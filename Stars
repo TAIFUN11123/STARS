@@ -29,7 +29,7 @@ CARD_HOLDER = "ЮСУФ Н."
  
 # Картинка-баннер, которая прикрепляется к каждому сообщению бота.
 # Файл должен лежать РЯДОМ с этим скриптом, в той же папке, и называться ровно banner.jpg
-BANNER_PATH = "banner.jpg"
+BANNER_PATH = "BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo.png""
  
 DATA_FILE = "data.json"
  
@@ -172,23 +172,29 @@ def _has_banner() -> bool:
     return os.path.exists(BANNER_PATH)
  
 async def send_screen(message: Message, text: str, reply_markup=None):
-    if _has_banner():
-        photo = FSInputFile(BANNER_PATH)
-        await message.answer_photo(photo=photo, caption=text, reply_markup=reply_markup)
-    else:
-        await message.answer(text, reply_markup=reply_markup)
+    await message.answer_photo(
+        photo=BANNER_URL,
+        caption=text,
+        reply_markup=reply_markup
+    )
  
 async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
-    if _has_banner() and callback.message.photo:
-        media = InputMediaPhoto(media=FSInputFile(BANNER_PATH), caption=text)
-        await callback.message.edit_media(media=media, reply_markup=reply_markup)
-    elif _has_banner():
+    try:
+        media = InputMediaPhoto(
+            media=BANNER_URL,
+            caption=text
+        )
+        await callback.message.edit_media(
+            media=media,
+            reply_markup=reply_markup
+        )
+    except Exception:
         await callback.message.delete()
-        photo = FSInputFile(BANNER_PATH)
-        await callback.message.answer_photo(photo=photo, caption=text, reply_markup=reply_markup)
-    else:
-        await callback.message.edit_text(text, reply_markup=reply_markup)
- 
+        await callback.message.answer_photo(
+            photo=BANNER_URL,
+            caption=text,
+            reply_markup=reply_markup
+        )
 # ==================== БОТ ====================
  
 if PROXY_URL:

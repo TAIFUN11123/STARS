@@ -136,6 +136,7 @@ def recipient_kb():
 def payment_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="₽ Рубли (перевод на карту)", callback_data="pay_rub")],
+        [InlineKeyboardButton(text="💎 CryptoBot", callback_data="pay_crypto")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
     ])
  
@@ -321,6 +322,52 @@ async def cb_buy_self(callback: CallbackQuery, state: FSMContext):
     text = f"🎉 {d['amount']} ⭐ для {recipient} — {d['price']}₽\n\n💳 Способ оплаты:"
     await edit_screen(callback, text, reply_markup=payment_kb())
     await callback.answer()
+  
+
+
+# ⬇️ ВСТАВИТЬ СЮДА CRYPTO
+
+
+@router.callback_query(F.data == "pay_crypto", BuyStates.choosing_payment)
+async def cb_pay_crypto(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+
+    if crypto is None:
+        await callback.answer("CryptoBot не подключён", show_alert=True)
+        return
+
+    invoice = await crypto.create_invoice(
+        asset="USDT",
+        amount=str(d["price"])
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="💎 Оплатить CryptoBot",
+                url=invoice.bot_invoice_url
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data="back_main"
+            )
+        ]
+    ])
+
+    await edit_screen(
+        callback,
+        f"💎 Оплата через CryptoBot\n\n"
+        f"⭐ Количество: {d['amount']}\n"
+        f"💵 Сумма: {d['price']} USDT",
+        reply_markup=kb
+    )
+
+    await callback.answer()
+
+
+
  
 @router.message(BuyStates.entering_recipient)
 async def process_recipient(message: Message, state: FSMContext):
@@ -371,7 +418,7 @@ async def process_receipt(message: Message, state: FSMContext):
         await message.answer("⚠️ Заказ не найден, начните заново через /buy")
         await state.clear()
         return
- 
+
     caption = (
         f"🧾 Чек по заказу №{order['id'][:8]} (звёзды)\nОт: @{message.from_user.username or message.from_user.id}\n"
         f"⭐ {order['amount']} → {order['recipient']}\n💵 {order['price']}₽\n\n"

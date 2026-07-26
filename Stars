@@ -20,6 +20,7 @@ from aiogram.types import (
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
+print("CRYPTO:", CRYPTO_TOKEN)
 ADMIN_ID = 1800089290                    # <-- твой Telegram ID (узнать у @userinfobot)
 PROXY_URL = ""  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
  

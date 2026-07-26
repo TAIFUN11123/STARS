@@ -273,55 +273,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer("👇", reply_markup=persistent_menu_kb())
     await show_main_menu(message)
  
-@router.message(Command("menu"))
-async def cmd_menu(message: Message, state: FSMContext):
-    await state.clear()
-    await show_main_menu(message)
- 
-@router.message(F.text == "📋 Меню")
-async def btn_menu(message: Message, state: FSMContext):
-    await state.clear()
-    await show_main_menu(message)
- 
-@router.callback_query(F.data == "pay_crypto", BuyStates.choosing_payment)
-async def cb_pay_crypto(callback: CallbackQuery, state: FSMContext):
-    d = await state.get_data()
 
-    if crypto is None:
-        await callback.answer("CryptoBot не подключён", show_alert=True)
-        return
-
-    crypto_price = CRYPTO_PRICES.get(d["amount"])
-
-    invoice = await crypto.create_invoice(
-        asset="USDT",
-        amount=str(crypto_price)
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="💎 Оплатить CryptoBot",
-                url=invoice.bot_invoice_url
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="◀️ Назад",
-                callback_data="back_main"
-            )
-        ]
-    ])
-
-    await edit_screen(
-        callback,
-        f"💎 Оплата через CryptoBot\n\n"
-        f"⭐ Количество: {d['amount']}\n"
-        f"💵 Сумма: {crypto_price} USDT",
-        reply_markup=kb
-    )
-
-    await callback.answer()
  
 # -------------------- ПОКУПКА ЗВЁЗД --------------------
  

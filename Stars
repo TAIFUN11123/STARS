@@ -168,9 +168,8 @@ def persistent_menu_kb():
  
 # -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
  
-def _has_banner() -> bool:
-    return os.path.exists(BANNER_PATH)
- 
+# -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
+
 async def send_screen(message: Message, text: str, reply_markup=None):
     await message.answer_photo(
         photo=BANNER_URL,

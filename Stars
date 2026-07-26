@@ -210,13 +210,17 @@ if PROXY_URL:
     bot = Bot(token=BOT_TOKEN, session=session)
 else:
     bot = Bot(token=BOT_TOKEN)
-if CRYPTO_TOKEN:
+print("CRYPTO_TOKEN VALUE:", repr(CRYPTO_TOKEN))
+
+if CRYPTO_TOKEN and len(CRYPTO_TOKEN) > 10:
     crypto = AioCryptoPay(
-        token=CRYPTO_TOKEN,
+        token=CRYPTO_TOKEN.strip(),
         network=Networks.MAIN_NET
     )
+    print("CRYPTO INIT OK")
 else:
     crypto = None
+    print("CRYPTO INIT FAILED")
  
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()

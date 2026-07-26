@@ -360,7 +360,7 @@ invoice = await crypto.create_invoice(
     amount=str(crypto_price)
 )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
                 text="💎 Оплатить CryptoBot",

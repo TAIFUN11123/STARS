@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir \
 
 CMD ["python", "Stars"]
 
-После этого:
+

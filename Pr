@@ -39,6 +39,18 @@ PRICES = {
     50: 85, 100: 170, 150: 255, 200: 340, 250: 425,
     300: 510, 500: 850, 750: 1275, 1000: 1700, 5000: 8500,
 }
+CRYPTO_PRICES = {
+    50: 1.09,
+    100: 2.18,
+    150: 3.27,
+    200: 4.36,
+    250: 5.45,
+    300: 6.54,
+    500: 10.90,
+    750: 16.35,
+    1000: 21.80,
+    5000: 109.00,
+}
 RATE = 1.70  # руб за 1 звезду (для произвольного количества)
  
 PREMIUM_PRICES = {
@@ -341,10 +353,12 @@ async def cb_pay_crypto(callback: CallbackQuery, state: FSMContext):
         await callback.answer("CryptoBot не подключён", show_alert=True)
         return
 
-    invoice = await crypto.create_invoice(
-        asset="USDT",
-        amount=str(d["price"])
-    )
+    crypto_price = CRYPTO_PRICES.get(d["amount"])
+
+invoice = await crypto.create_invoice(
+    asset="USDT",
+    amount=str(crypto_price)
+)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [

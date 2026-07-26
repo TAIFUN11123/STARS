@@ -18,7 +18,7 @@ from aiogram.types import (
 )
  
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = ""   # <-- вставь сюда токен
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 1800089290                    # <-- твой Telegram ID (узнать у @userinfobot)
 PROXY_URL = "socks5://127.0.0.1:10808"  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
  

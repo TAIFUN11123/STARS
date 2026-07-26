@@ -471,7 +471,7 @@ async def cb_balance(callback: CallbackQuery):
  
 @router.callback_query(F.data == "faq")
 async def cb_faq(callback: CallbackQuery):
-    text = "📋 FAQ\n\n🆘 Поддержка: @your_support_username"
+    text = "📋 FAQ\n\n🆘 Поддержка: @HelpStarsShop"
     await edit_screen(callback, text, reply_markup=back_kb())
     await callback.answer()
  

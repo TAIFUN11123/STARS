@@ -8,9 +8,7 @@ RUN pip install --no-cache-dir \
     aiogram>=3.0.0 \
     pyTelegramBotAPI \
     requests \
-    aiohttp-socks
+    aiohttp-socks \
     python-dotenv
 
 CMD ["python", "Stars"]
-
-

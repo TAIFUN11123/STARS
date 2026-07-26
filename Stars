@@ -1,0 +1,639 @@
+import asyncio
+import json
+import os
+import ssl
+import uuid
+from datetime import datetime
+ 
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InputMediaPhoto,
+    BotCommand,
+)
+ 
+# ==================== НАСТРОЙКИ ====================
+BOT_TOKEN = ""   # <-- вставь сюда токен
+ADMIN_ID = 1800089290                    # <-- твой Telegram ID (узнать у @userinfobot)
+PROXY_URL = "socks5://127.0.0.1:10808"  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
+ 
+# Реквизиты для оплаты (ЗАГЛУШКА - замени на свои реальные!)
+CARD_NUMBER = "2200 7021 6855 9784"
+CARD_BANK = "Т-Банк (Тинькофф)"
+CARD_HOLDER = "ЮСУФ Н."
+ 
+# Картинка-баннер, которая прикрепляется к каждому сообщению бота.
+# Файл должен лежать РЯДОМ с этим скриптом, в той же папке, и называться ровно banner.jpg
+BANNER_PATH = "banner.jpg"
+ 
+DATA_FILE = "data.json"
+ 
+PRICES = {
+    50: 85, 100: 170, 150: 255, 200: 340, 250: 425,
+    300: 510, 500: 850, 750: 1275, 1000: 1700, 5000: 8500,
+}
+RATE = 1.70  # руб за 1 звезду (для произвольного количества)
+ 
+PREMIUM_PRICES = {
+    "3": {"label": "3 месяца", "price": 1103},
+    "6": {"label": "6 месяцев", "price": 1471},
+    "12": {"label": "1 год", "price": 2667},
+}
+ 
+MIN_WITHDRAW = 50        # минимальная сумма вывода реферальных звёзд
+REFERRAL_BONUS = 1.2     # сколько звёзд начисляется СРАЗУ за каждого приглашённого (по факту старта по ссылке)
+ 
+MIN_USERNAME_LEN = 5
+MAX_USERNAME_LEN = 32
+ 
+# ==================== ХРАНИЛИЩЕ ====================
+ 
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"users": {}, "orders": {}, "withdrawals": {}}
+ 
+def save_data(d):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+ 
+def get_user(d, user_id):
+    uid = str(user_id)
+    if uid not in d["users"]:
+        d["users"][uid] = {
+            "total_bought": 0,
+            "referrals": [],
+            "referral_earned": 0,
+            "referral_withdrawn": 0,
+        }
+    u = d["users"][uid]
+    u.setdefault("total_bought", 0)
+    u.setdefault("referrals", [])
+    u.setdefault("referral_earned", 0)
+    u.setdefault("referral_withdrawn", 0)
+    return u
+ 
+data = load_data()
+data.setdefault("withdrawals", {})
+ 
+def is_valid_username(text: str) -> bool:
+    name = text.strip().lstrip("@")
+    return MIN_USERNAME_LEN <= len(name) <= MAX_USERNAME_LEN
+ 
+# ==================== FSM ====================
+ 
+class BuyStates(StatesGroup):
+    choosing_amount = State()
+    entering_custom_amount = State()
+    entering_recipient = State()
+    choosing_payment = State()
+    waiting_receipt = State()
+ 
+class PremiumStates(StatesGroup):
+    waiting_receipt = State()
+ 
+class WithdrawStates(StatesGroup):
+    entering_requisites = State()
+ 
+# ==================== КЛАВИАТУРЫ ====================
+ 
+def main_menu_kb():
+    kb = [
+        [InlineKeyboardButton(text="⭐ Купить", callback_data="buy"),
+         InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
+        [InlineKeyboardButton(text="👥 Реферальная система", callback_data="referral")],
+        [InlineKeyboardButton(text="📋 FAQ", callback_data="faq")],
+        [InlineKeyboardButton(text="📜 История заказов", callback_data="history")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+ 
+def amounts_kb():
+    kb, row = [], []
+    for amount, price in PRICES.items():
+        row.append(InlineKeyboardButton(text=f"⭐ {amount} - {price}₽", callback_data=f"amt_{amount}"))
+        if len(row) == 2:
+            kb.append(row); row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="🔢 Ввести своё количество", callback_data="custom_amount")])
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+ 
+def recipient_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Купить себе", callback_data="buy_self")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+ 
+def payment_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="₽ Рубли (перевод на карту)", callback_data="pay_rub")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+ 
+def premium_menu_kb():
+    kb = []
+    for key, info in PREMIUM_PRICES.items():
+        kb.append([InlineKeyboardButton(text=f"{info['label']} — {info['price']} ₽", callback_data=f"prem_{key}")])
+    kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+ 
+def premium_pay_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="₽ Рубли (перевод на карту)", callback_data="prempay_confirm")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+ 
+def back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]])
+ 
+def referral_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Вывести", callback_data="withdraw")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+ 
+def persistent_menu_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📋 Меню")]],
+        resize_keyboard=True,
+    )
+ 
+# -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
+ 
+def _has_banner() -> bool:
+    return os.path.exists(BANNER_PATH)
+ 
+async def send_screen(message: Message, text: str, reply_markup=None):
+    if _has_banner():
+        photo = FSInputFile(BANNER_PATH)
+        await message.answer_photo(photo=photo, caption=text, reply_markup=reply_markup)
+    else:
+        await message.answer(text, reply_markup=reply_markup)
+ 
+async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
+    if _has_banner() and callback.message.photo:
+        media = InputMediaPhoto(media=FSInputFile(BANNER_PATH), caption=text)
+        await callback.message.edit_media(media=media, reply_markup=reply_markup)
+    elif _has_banner():
+        await callback.message.delete()
+        photo = FSInputFile(BANNER_PATH)
+        await callback.message.answer_photo(photo=photo, caption=text, reply_markup=reply_markup)
+    else:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+ 
+# ==================== БОТ ====================
+ 
+if PROXY_URL:
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+ 
+    session = AiohttpSession(proxy=PROXY_URL)
+    session._connector_init["ssl"] = ssl_context
+ 
+    bot = Bot(token=BOT_TOKEN, session=session)
+else:
+    bot = Bot(token=BOT_TOKEN)
+ 
+dp = Dispatcher(storage=MemoryStorage())
+router = Router()
+dp.include_router(router)
+ 
+# -------------------- СТАРТ / МЕНЮ --------------------
+ 
+async def show_main_menu(message: Message):
+    text = (
+        f"🐤 Привет, {message.from_user.first_name}!\n\n"
+        "🕵️ Я бот для покупки Telegram звёзд за рубли\n\n"
+        "🧑‍💻 Для начала покупки используйте /buy или нажмите кнопку ниже"
+    )
+    await send_screen(message, text, reply_markup=main_menu_kb())
+ 
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    get_user(data, message.from_user.id)
+ 
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("ref_"):
+        ref_id = args[1].replace("ref_", "")
+        if ref_id != str(message.from_user.id):
+            ref_user = get_user(data, ref_id)
+            if message.from_user.id not in ref_user["referrals"]:
+                ref_user["referrals"].append(message.from_user.id)
+                ref_user["referral_earned"] += REFERRAL_BONUS  # начисляем СРАЗУ за приглашение
+                save_data(data)
+                try:
+                    await bot.send_message(
+                        int(ref_id),
+                        f"🎉 По вашей ссылке зарегистрировался новый пользователь! Начислено {REFERRAL_BONUS} ⭐"
+                    )
+                except Exception:
+                    pass
+ 
+    await message.answer("👇", reply_markup=persistent_menu_kb())
+    await show_main_menu(message)
+ 
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await show_main_menu(message)
+ 
+@router.message(F.text == "📋 Меню")
+async def btn_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await show_main_menu(message)
+ 
+@router.callback_query(F.data == "back_main")
+async def cb_back_main(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await edit_screen(callback, "🏠 Главное меню:", reply_markup=main_menu_kb())
+    await callback.answer()
+ 
+# -------------------- ПОКУПКА ЗВЁЗД --------------------
+ 
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, state: FSMContext):
+    await state.set_state(BuyStates.choosing_amount)
+    await send_screen(message, "🤑 Выберите количество звёзд для покупки:", reply_markup=amounts_kb())
+ 
+@router.callback_query(F.data == "buy")
+async def cb_buy(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(BuyStates.choosing_amount)
+    await edit_screen(callback, "🤑 Выберите количество звёзд для покупки:", reply_markup=amounts_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data.startswith("amt_"))
+async def cb_choose_amount(callback: CallbackQuery, state: FSMContext):
+    amount = int(callback.data.split("_")[1])
+    price = PRICES[amount]
+    await state.update_data(amount=amount, price=price)
+    await state.set_state(BuyStates.entering_recipient)
+    text = f"🎉 Вы выбрали: {amount} ⭐ — {price}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
+    await edit_screen(callback, text, reply_markup=recipient_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data == "custom_amount")
+async def cb_custom_amount(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(BuyStates.entering_custom_amount)
+    await edit_screen(callback, "🔢 Введите количество звёзд числом (50-11363):", reply_markup=back_kb())
+    await callback.answer()
+ 
+@router.message(BuyStates.entering_custom_amount)
+async def process_custom_amount(message: Message, state: FSMContext):
+    if not message.text.isdigit() or not (50 <= int(message.text) <= 11363):
+        await message.answer("⚠️ Введите число от 50 до 11363:")
+        return
+    amount = int(message.text)
+    price = round(amount * RATE, 2)
+    await state.update_data(amount=amount, price=price)
+    await state.set_state(BuyStates.entering_recipient)
+    text = f"🎉 Вы выбрали: {amount} ⭐ — {price}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
+    await send_screen(message, text, reply_markup=recipient_kb())
+ 
+@router.callback_query(F.data == "buy_self", BuyStates.entering_recipient)
+async def cb_buy_self(callback: CallbackQuery, state: FSMContext):
+    recipient = f"@{callback.from_user.username}" if callback.from_user.username else str(callback.from_user.id)
+    await state.update_data(recipient=recipient)
+    await state.set_state(BuyStates.choosing_payment)
+    d = await state.get_data()
+    text = f"🎉 {d['amount']} ⭐ для {recipient} — {d['price']}₽\n\n💳 Способ оплаты:"
+    await edit_screen(callback, text, reply_markup=payment_kb())
+    await callback.answer()
+ 
+@router.message(BuyStates.entering_recipient)
+async def process_recipient(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    if not is_valid_username(raw):
+        await message.answer(
+            f"⚠️ Некорректный юзернейм. Он должен быть от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов.\n"
+            "Отправьте @username ещё раз:"
+        )
+        return
+    recipient = raw if raw.startswith("@") else "@" + raw
+    await state.update_data(recipient=recipient)
+    await state.set_state(BuyStates.choosing_payment)
+    d = await state.get_data()
+    text = f"🎉 {d['amount']} ⭐ для {recipient} — {d['price']}₽\n\n💳 Способ оплаты:"
+    await send_screen(message, text, reply_markup=payment_kb())
+ 
+@router.callback_query(F.data == "pay_rub", BuyStates.choosing_payment)
+async def cb_pay_rub(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    order_id = str(uuid.uuid4())
+    order = {
+        "id": order_id, "type": "stars", "user_id": str(callback.from_user.id),
+        "username": callback.from_user.username or "",
+        "recipient": d["recipient"], "amount": d["amount"], "price": d["price"],
+        "status": "ожидает оплаты", "created_at": datetime.now().isoformat(),
+    }
+    data["orders"][order_id] = order
+    save_data(data)
+    await state.update_data(order_id=order_id)
+    await state.set_state(BuyStates.waiting_receipt)
+ 
+    text = (
+        f"💳 Оплата переводом на карту\n\n"
+        f"⭐ Количество: {d['amount']}\n🎁 Получатель: {d['recipient']}\n💵 Сумма: {d['price']}₽\n\n"
+        f"🏦 Реквизиты:\nБанк: {CARD_BANK}\nКарта: {CARD_NUMBER}\nПолучатель: {CARD_HOLDER}\n\n"
+        f"📎 После оплаты ОБЯЗАТЕЛЬНО отправьте сюда чек (фото или PDF) — иначе заказ не обработается!\n\n"
+        f"🆔 ID заказа: {order_id[:8]}"
+    )
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
+ 
+@router.message(BuyStates.waiting_receipt, F.photo | F.document)
+async def process_receipt(message: Message, state: FSMContext):
+    d = await state.get_data()
+    order = data["orders"].get(d.get("order_id"))
+    if not order:
+        await message.answer("⚠️ Заказ не найден, начните заново через /buy")
+        await state.clear()
+        return
+ 
+    caption = (
+        f"🧾 Чек по заказу №{order['id'][:8]} (звёзды)\nОт: @{message.from_user.username or message.from_user.id}\n"
+        f"⭐ {order['amount']} → {order['recipient']}\n💵 {order['price']}₽\n\n"
+        f"Подтвердить: /confirm {order['id'][:8]}"
+    )
+    if message.photo:
+        await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption)
+    else:
+        await bot.send_document(ADMIN_ID, message.document.file_id, caption=caption)
+ 
+    order["status"] = "чек отправлен, ожидает проверки"
+    save_data(data)
+    await state.clear()
+    await send_screen(message, "✅ Чек получен и отправлен на проверку. Спасибо за покупку! 🎉", reply_markup=main_menu_kb())
+ 
+# -------------------- PREMIUM --------------------
+ 
+@router.callback_query(F.data == "premium")
+async def cb_premium(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text = (
+        "💎 Telegram Premium\n\n"
+        "Выберите срок подписки:\n\n"
+        f"• {PREMIUM_PRICES['3']['label']}: {PREMIUM_PRICES['3']['price']} ₽\n"
+        f"• {PREMIUM_PRICES['6']['label']}: {PREMIUM_PRICES['6']['price']} ₽\n"
+        f"• {PREMIUM_PRICES['12']['label']}: {PREMIUM_PRICES['12']['price']} ₽\n\n"
+        "Оплата переводом на карту. Premium активируется после проверки чека."
+    )
+    await edit_screen(callback, text, reply_markup=premium_menu_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data.startswith("prem_"))
+async def cb_premium_choose(callback: CallbackQuery, state: FSMContext):
+    key = callback.data.split("_", 1)[1]
+    info = PREMIUM_PRICES[key]
+    await state.update_data(premium_key=key, premium_price=info["price"], premium_label=info["label"])
+    text = f"💎 Premium — {info['label']}\n💵 Сумма: {info['price']}₽\n\n💳 Способ оплаты:"
+    await edit_screen(callback, text, reply_markup=premium_pay_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data == "prempay_confirm")
+async def cb_premium_pay(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if "premium_price" not in d:
+        await callback.answer("Сессия устарела, выберите подписку заново", show_alert=True)
+        await edit_screen(callback, "💎 Раздел Premium:", reply_markup=premium_menu_kb())
+        return
+ 
+    order_id = str(uuid.uuid4())
+    order = {
+        "id": order_id, "type": "premium", "user_id": str(callback.from_user.id),
+        "username": callback.from_user.username or "",
+        "recipient": f"@{callback.from_user.username}" if callback.from_user.username else str(callback.from_user.id),
+        "label": d["premium_label"], "price": d["premium_price"],
+        "status": "ожидает оплаты", "created_at": datetime.now().isoformat(),
+    }
+    data["orders"][order_id] = order
+    save_data(data)
+    await state.update_data(order_id=order_id)
+    await state.set_state(PremiumStates.waiting_receipt)
+ 
+    text = (
+        f"💳 Оплата Premium переводом на карту\n\n"
+        f"💎 Подписка: {d['premium_label']}\n💵 Сумма: {d['premium_price']}₽\n\n"
+        f"🏦 Реквизиты:\nБанк: {CARD_BANK}\nКарта: {CARD_NUMBER}\nПолучатель: {CARD_HOLDER}\n\n"
+        f"📎 После оплаты ОБЯЗАТЕЛЬНО отправьте сюда чек (фото или PDF) — иначе заказ не обработается!\n\n"
+        f"🆔 ID заказа: {order_id[:8]}"
+    )
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
+ 
+@router.message(PremiumStates.waiting_receipt, F.photo | F.document)
+async def process_premium_receipt(message: Message, state: FSMContext):
+    d = await state.get_data()
+    order = data["orders"].get(d.get("order_id"))
+    if not order:
+        await message.answer("⚠️ Заказ не найден, начните заново через раздел Premium")
+        await state.clear()
+        return
+ 
+    caption = (
+        f"🧾 Чек по заказу №{order['id'][:8]} (Premium)\nОт: @{message.from_user.username or message.from_user.id}\n"
+        f"💎 {order['label']} → {order['recipient']}\n💵 {order['price']}₽\n\n"
+        f"Подтвердить: /confirm {order['id'][:8]}"
+    )
+    if message.photo:
+        await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption)
+    else:
+        await bot.send_document(ADMIN_ID, message.document.file_id, caption=caption)
+ 
+    order["status"] = "чек отправлен, ожидает проверки"
+    save_data(data)
+    await state.clear()
+    await send_screen(message, "✅ Чек получен и отправлен на проверку. Спасибо за покупку! 🎉", reply_markup=main_menu_kb())
+ 
+# -------------------- БАЛАНС / FAQ / ИСТОРИЯ --------------------
+# "Баланс" показывает ТОЛЬКО реферальные накопления, а не купленные звёзды.
+ 
+@router.callback_query(F.data == "balance")
+async def cb_balance(callback: CallbackQuery):
+    user = get_user(data, callback.from_user.id)
+    current = user["referral_earned"] - user["referral_withdrawn"]
+    text = (
+        f"💰 Баланс (реферальный)\n\n"
+        f"⭐ Текущий баланс: {current:.2f} звёзд\n"
+        f"📊 Всего куплено звёзд (лично вами): {user['total_bought']}"
+    )
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data == "faq")
+async def cb_faq(callback: CallbackQuery):
+    text = "📋 FAQ\n\n🆘 Поддержка: @your_support_username"
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data == "history")
+async def cb_history(callback: CallbackQuery):
+    uid = str(callback.from_user.id)
+    orders = [o for o in data["orders"].values() if o["user_id"] == uid]
+    if not orders:
+        text = "📜 У вас пока нет заказов."
+    else:
+        lines = []
+        for o in orders[-10:]:
+            if o.get("type") == "premium":
+                lines.append(f"№{o['id'][:8]} — Premium {o['label']} — {o['price']}₽ — {o['status']}")
+            else:
+                lines.append(f"№{o['id'][:8]} — {o['amount']}⭐ — {o['price']}₽ — {o['status']}")
+        text = "📜 История заказов:\n" + "\n".join(lines)
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
+ 
+# -------------------- РЕФЕРАЛЬНАЯ СИСТЕМА --------------------
+ 
+@router.callback_query(F.data == "referral")
+async def cb_referral(callback: CallbackQuery):
+    user = get_user(data, callback.from_user.id)
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start=ref_{callback.from_user.id}"
+ 
+    current_balance = user["referral_earned"] - user["referral_withdrawn"]
+ 
+    text = (
+        f"👥 Реферальная система\n\n"
+        f"🔗 Ваша реферальная ссылка:\n{link}\n\n"
+        f"💵 За каждого приглашённого пользователя начисляется {REFERRAL_BONUS} ⭐ сразу при регистрации\n\n"
+        f"👤 Приглашено пользователей: {len(user['referrals'])}\n"
+        f"💰 Всего заработано: {user['referral_earned']:.2f} звёзд\n"
+        f"💸 Выведено: {user['referral_withdrawn']:.2f} звёзд\n"
+        f"⭐ Текущий баланс: {current_balance:.2f} звёзд\n\n"
+        f"Минимальная сумма вывода: {MIN_WITHDRAW} звёзд"
+    )
+ 
+    await edit_screen(callback, text, reply_markup=referral_kb())
+    await callback.answer()
+ 
+@router.callback_query(F.data == "withdraw")
+async def cb_withdraw(callback: CallbackQuery, state: FSMContext):
+    user = get_user(data, callback.from_user.id)
+    current_balance = user["referral_earned"] - user["referral_withdrawn"]
+    if current_balance < MIN_WITHDRAW:
+        await callback.answer(
+            f"❌ Недостаточно звёзд для вывода.\nВаш баланс: {current_balance:.2f} ⭐\nМинимум: {MIN_WITHDRAW} ⭐",
+            show_alert=True,
+        )
+        return
+    await state.set_state(WithdrawStates.entering_requisites)
+    await edit_screen(
+        callback,
+        f"💸 Вывод {current_balance:.2f} звёзд\n\n"
+        "Отправьте реквизиты для вывода (номер карты или @username для перевода звёздами):",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+ 
+@router.message(WithdrawStates.entering_requisites)
+async def process_withdraw(message: Message, state: FSMContext):
+    user = get_user(data, message.from_user.id)
+    current_balance = user["referral_earned"] - user["referral_withdrawn"]
+    if current_balance < MIN_WITHDRAW:
+        await message.answer(f"❌ Недостаточно звёзд для вывода. Ваш баланс: {current_balance:.2f} ⭐")
+        await state.clear()
+        return
+ 
+    withdraw_id = str(uuid.uuid4())
+    data["withdrawals"][withdraw_id] = {
+        "id": withdraw_id,
+        "user_id": str(message.from_user.id),
+        "username": message.from_user.username or "",
+        "amount": current_balance,
+        "requisites": message.text,
+        "status": "ожидает выплаты",
+        "created_at": datetime.now().isoformat(),
+    }
+    save_data(data)
+ 
+    await bot.send_message(
+        ADMIN_ID,
+        f"💸 Запрос на вывод №{withdraw_id[:8]}\n"
+        f"От: @{message.from_user.username or message.from_user.id}\n"
+        f"Сумма: {current_balance:.2f} звёзд\n"
+        f"Реквизиты: {message.text}\n\n"
+        f"Подтвердить: /confirm_withdraw {withdraw_id[:8]}"
+    )
+ 
+    await state.clear()
+    await send_screen(
+        message,
+        "✅ Заявка на вывод отправлена и будет обработана в ближайшее время.",
+        reply_markup=main_menu_kb(),
+    )
+ 
+# -------------------- АДМИНСКИЕ КОМАНДЫ --------------------
+ 
+@router.message(Command("confirm"))
+async def cmd_confirm(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /confirm <ID заказа>")
+        return
+    found = next((o for oid, o in data["orders"].items() if oid.startswith(args[1])), None)
+    if not found:
+        await message.answer("Заказ не найден.")
+        return
+    found["status"] = "оплачено"
+ 
+    if found.get("type") == "premium":
+        save_data(data)
+        await bot.send_message(
+            int(found["user_id"]),
+            f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) скоро будет активирован.",
+        )
+    else:
+        buyer_id = int(found["user_id"])
+        buyer = get_user(data, buyer_id)
+        buyer["total_bought"] += found["amount"]
+        save_data(data)
+        await bot.send_message(
+            buyer_id,
+            f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} отправлено.",
+        )
+ 
+    await message.answer(f"Заказ {args[1]} подтверждён.")
+ 
+@router.message(Command("confirm_withdraw"))
+async def cmd_confirm_withdraw(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /confirm_withdraw <ID вывода>")
+        return
+    withdrawals = data.get("withdrawals", {})
+    found = next((w for wid, w in withdrawals.items() if wid.startswith(args[1])), None)
+    if not found:
+        await message.answer("Заявка на вывод не найдена.")
+        return
+    user = get_user(data, found["user_id"])
+    user["referral_withdrawn"] += found["amount"]
+    found["status"] = "выплачено"
+    save_data(data)
+    await bot.send_message(int(found["user_id"]), f"✅ Ваш вывод №{found['id'][:8]} на {found['amount']:.2f} звёзд выполнен.")
+    await message.answer(f"Вывод {args[1]} подтверждён.")
+ 
+async def main():
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="menu", description="Открыть меню"),
+        BotCommand(command="buy", description="Купить звёзды"),
+    ])
+    await dp.start_polling(bot)
+ 
+if __name__ == "__main__":
+    asyncio.run(main())
+ 

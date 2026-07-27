@@ -225,8 +225,11 @@ async def fragment_send_stars(recipient: str, amount: int):
             },
             wallet_version="V4R2",
         ) as client:
-            result = await client.purchase_stars(recipient, amount=amount, payment_method=PaymentMethod.USDT_GRAM)
-            return True, f"tx: {getattr(result, 'transaction_id', 'ok')}"
+           result = await client.purchase_stars(
+    recipient,
+    amount=amount,
+    payment_method=PaymentMethod.GRAM
+)
     except Exception as e:
         return False, str(e)
 

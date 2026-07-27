@@ -124,6 +124,7 @@ def main_menu_kb():
         [InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
         [InlineKeyboardButton(text="👥 Реферальная система", callback_data="referral")],
         [InlineKeyboardButton(text="📋 FAQ", callback_data="faq")],
+        [InlineKeyboardButton(text="⭐ Отзывы", url="https://t.me/TaifunSh")],
         [InlineKeyboardButton(text="📜 История заказов", callback_data="history")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)

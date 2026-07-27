@@ -20,9 +20,17 @@ from aiogram.types import (
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
-print("CRYPTO:", CRYPTO_TOKEN)
 ADMIN_ID = 1800089290                    # <-- твой Telegram ID (узнать у @userinfobot)
 PROXY_URL = ""  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
+
+# ---- Fragment (автоматическая отправка звёзд/Premium) ----
+TON_SEED = os.getenv("TON_SEED")                    # 24 слова seed-фразы кошелька, через пробел
+TONAPI_KEY = os.getenv("TONAPI_KEY")                # ключ с tonconsole.com
+FRAGMENT_SSID = os.getenv("FRAGMENT_SSID")
+FRAGMENT_DT = os.getenv("FRAGMENT_DT")
+FRAGMENT_TOKEN = os.getenv("FRAGMENT_TOKEN")
+FRAGMENT_TON_TOKEN = os.getenv("FRAGMENT_TON_TOKEN")
+FRAGMENT_ENABLED = bool(TON_SEED and TONAPI_KEY and FRAGMENT_SSID and FRAGMENT_TOKEN)
 
 # Реквизиты для оплаты (ЗАГЛУШКА - замени на свои реальные!)
 CARD_NUMBER = "2200 7021 6855 9784"
@@ -40,11 +48,8 @@ PRICES = {
 }
 RATE = 1.70  # руб за 1 звезду (для произвольного количества)
 
-# Курс для CryptoBot: 0.0218 USDT за 1 звезду (тот же курс, что и в твоём прежнем прайсе:
-# 50 -> 1.09, 100 -> 2.18, 5000 -> 109.00 и т.д. — считается формулой, а не таблицей,
-# поэтому работает и для произвольного количества звёзд.)
 CRYPTO_STAR_RATE = 0.0218  # USDT за 1 звезду
-CRYPTO_RUB_RATE = RATE / CRYPTO_STAR_RATE  # ~77.98 руб за 1 USDT (пересчитано из тех же цифр)
+CRYPTO_RUB_RATE = RATE / CRYPTO_STAR_RATE  # ~77.98 руб за 1 USDT
 
 def stars_to_usdt(amount: int) -> float:
     return round(amount * CRYPTO_STAR_RATE, 2)
@@ -53,13 +58,13 @@ def rub_to_usdt(rub_amount: float) -> float:
     return round(rub_amount / CRYPTO_RUB_RATE, 2)
 
 PREMIUM_PRICES = {
-    "3": {"label": "3 месяца", "price": 1103},
-    "6": {"label": "6 месяцев", "price": 1471},
-    "12": {"label": "1 год", "price": 2667},
+    "3": {"label": "3 месяца", "price": 1103, "months": 3},
+    "6": {"label": "6 месяцев", "price": 1471, "months": 6},
+    "12": {"label": "1 год", "price": 2667, "months": 12},
 }
 
-MIN_WITHDRAW = 50        # минимальная сумма вывода реферальных звёзд
-REFERRAL_BONUS = 1.2     # сколько звёзд начисляется СРАЗУ за каждого приглашённого (по факту старта по ссылке)
+MIN_WITHDRAW = 50
+REFERRAL_BONUS = 1.2
 
 MIN_USERNAME_LEN = 5
 MAX_USERNAME_LEN = 32
@@ -186,29 +191,68 @@ def persistent_menu_kb():
 # -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
 
 async def send_screen(message: Message, text: str, reply_markup=None):
-    await message.answer_photo(
-        photo=BANNER_URL,
-        caption=text,
-        reply_markup=reply_markup
-    )
+    await message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
 
 async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
     try:
-        media = InputMediaPhoto(
-            media=BANNER_URL,
-            caption=text
-        )
-        await callback.message.edit_media(
-            media=media,
-            reply_markup=reply_markup
-        )
+        media = InputMediaPhoto(media=BANNER_URL, caption=text)
+        await callback.message.edit_media(media=media, reply_markup=reply_markup)
     except Exception:
         await callback.message.delete()
-        await callback.message.answer_photo(
-            photo=BANNER_URL,
-            caption=text,
-            reply_markup=reply_markup
-        )
+        await callback.message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
+
+# -------------------- FRAGMENT: АВТОМАТИЧЕСКАЯ ОТПРАВКА --------------------
+# Использует библиотеку pyfragment (pip install pyfragment).
+# Работает ЛОКАЛЬНО - seed-фраза используется только у тебя на сервере,
+# никуда на сторону не передаётся.
+
+async def fragment_send_stars(recipient: str, amount: int):
+    """Покупает и отправляет звёзды через Fragment. Возвращает (успех: bool, детали: str)."""
+    if not FRAGMENT_ENABLED:
+        return False, "Fragment не настроен (нет переменных окружения)"
+    try:
+        from pyfragment import FragmentClient
+        from pyfragment.enums import PaymentMethod
+
+        async with FragmentClient(
+            seed=TON_SEED,
+            api_key=TONAPI_KEY,
+            cookies={
+                "stel_ssid": FRAGMENT_SSID,
+                "stel_dt": FRAGMENT_DT,
+                "stel_token": FRAGMENT_TOKEN,
+                "stel_ton_token": FRAGMENT_TON_TOKEN,
+            },
+            wallet_version="V4R2",
+        ) as client:
+            result = await client.purchase_stars(recipient, amount=amount, payment_method=PaymentMethod.USDT_GRAM)
+            return True, f"tx: {getattr(result, 'transaction_id', 'ok')}"
+    except Exception as e:
+        return False, str(e)
+
+async def fragment_send_premium(recipient: str, months: int):
+    """Покупает и отправляет Premium через Fragment. Возвращает (успех: bool, детали: str)."""
+    if not FRAGMENT_ENABLED:
+        return False, "Fragment не настроен (нет переменных окружения)"
+    try:
+        from pyfragment import FragmentClient
+        from pyfragment.enums import PaymentMethod
+
+        async with FragmentClient(
+            seed=TON_SEED,
+            api_key=TONAPI_KEY,
+            cookies={
+                "stel_ssid": FRAGMENT_SSID,
+                "stel_dt": FRAGMENT_DT,
+                "stel_token": FRAGMENT_TOKEN,
+                "stel_ton_token": FRAGMENT_TON_TOKEN,
+            },
+            wallet_version="V4R2",
+        ) as client:
+            result = await client.purchase_premium(recipient, months=months, payment_method=PaymentMethod.GRAM)
+            return True, f"tx: {getattr(result, 'transaction_id', 'ok')}"
+    except Exception as e:
+        return False, str(e)
 
 # ==================== БОТ ====================
 
@@ -216,25 +260,16 @@ if PROXY_URL:
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
-
     session = AiohttpSession(proxy=PROXY_URL)
     session._connector_init["ssl"] = ssl_context
-
     bot = Bot(token=BOT_TOKEN, session=session)
 else:
     bot = Bot(token=BOT_TOKEN)
 
-print("CRYPTO_TOKEN VALUE:", repr(CRYPTO_TOKEN))
-
 if CRYPTO_TOKEN and len(CRYPTO_TOKEN) > 10:
-    crypto = AioCryptoPay(
-        token=CRYPTO_TOKEN.strip(),
-        network=Networks.MAIN_NET
-    )
-    print("CRYPTO INIT OK")
+    crypto = AioCryptoPay(token=CRYPTO_TOKEN.strip(), network=Networks.MAIN_NET)
 else:
     crypto = None
-    print("CRYPTO INIT FAILED")
 
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
@@ -262,7 +297,7 @@ async def cmd_start(message: Message, state: FSMContext):
             ref_user = get_user(data, ref_id)
             if message.from_user.id not in ref_user["referrals"]:
                 ref_user["referrals"].append(message.from_user.id)
-                ref_user["referral_earned"] += REFERRAL_BONUS  # начисляем СРАЗУ за приглашение
+                ref_user["referral_earned"] += REFERRAL_BONUS
                 save_data(data)
                 try:
                     await bot.send_message(
@@ -386,18 +421,22 @@ async def cb_pay_rub(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "pay_crypto", BuyStates.choosing_payment)
 async def cb_pay_crypto(callback: CallbackQuery, state: FSMContext):
     d = await state.get_data()
-
     if crypto is None:
         await callback.answer("CryptoBot не подключён", show_alert=True)
         return
 
-    # ИСПРАВЛЕНО: считаем сумму именно в USDT (по звёздам), а не берём рублёвую цену
     crypto_price = stars_to_usdt(d["amount"])
+    invoice = await crypto.create_invoice(asset="USDT", amount=str(crypto_price))
 
-    invoice = await crypto.create_invoice(
-        asset="USDT",
-        amount=str(crypto_price)
-    )
+    order_id = str(uuid.uuid4())
+    order = {
+        "id": order_id, "type": "stars", "user_id": str(callback.from_user.id),
+        "username": callback.from_user.username or "",
+        "recipient": d["recipient"], "amount": d["amount"], "price": d["price"],
+        "status": "ожидает оплаты (crypto)", "created_at": datetime.now().isoformat(),
+    }
+    data["orders"][order_id] = order
+    save_data(data)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 Оплатить CryptoBot", url=invoice.bot_invoice_url)],
@@ -408,10 +447,11 @@ async def cb_pay_crypto(callback: CallbackQuery, state: FSMContext):
         callback,
         f"💎 Оплата через CryptoBot\n\n"
         f"⭐ Количество: {d['amount']}\n"
-        f"💵 Сумма: {crypto_price} USDT",
+        f"💵 Сумма: {crypto_price} USDT\n\n"
+        f"🆔 ID заказа: {order_id[:8]}\n\n"
+        f"После оплаты дождитесь подтверждения от администратора.",
         reply_markup=kb
     )
-
     await callback.answer()
 
 @router.message(BuyStates.waiting_receipt, F.photo | F.document)
@@ -449,8 +489,7 @@ async def cb_premium(callback: CallbackQuery, state: FSMContext):
         f"• {PREMIUM_PRICES['3']['label']}: {PREMIUM_PRICES['3']['price']} ₽\n"
         f"• {PREMIUM_PRICES['6']['label']}: {PREMIUM_PRICES['6']['price']} ₽\n"
         f"• {PREMIUM_PRICES['12']['label']}: {PREMIUM_PRICES['12']['price']} ₽\n\n"
-        "Оплата рублями (перевод на карту) или в USDT через CryptoBot.\n"
-        "Premium активируется после проверки чека / оплаты."
+        "Оплата рублями (перевод на карту) или в USDT через CryptoBot."
     )
     await edit_screen(callback, text, reply_markup=premium_menu_kb())
     await callback.answer()
@@ -459,7 +498,7 @@ async def cb_premium(callback: CallbackQuery, state: FSMContext):
 async def cb_premium_choose(callback: CallbackQuery, state: FSMContext):
     key = callback.data.split("_", 1)[1]
     info = PREMIUM_PRICES[key]
-    await state.update_data(premium_key=key, premium_price=info["price"], premium_label=info["label"])
+    await state.update_data(premium_key=key, premium_price=info["price"], premium_label=info["label"], premium_months=info["months"])
     await state.set_state(PremiumStates.choosing_payment)
     text = f"💎 Premium — {info['label']}\n💵 Сумма: {info['price']}₽\n\n💳 Способ оплаты:"
     await edit_screen(callback, text, reply_markup=premium_pay_kb())
@@ -478,7 +517,7 @@ async def cb_premium_pay(callback: CallbackQuery, state: FSMContext):
         "id": order_id, "type": "premium", "user_id": str(callback.from_user.id),
         "username": callback.from_user.username or "",
         "recipient": f"@{callback.from_user.username}" if callback.from_user.username else str(callback.from_user.id),
-        "label": d["premium_label"], "price": d["premium_price"],
+        "label": d["premium_label"], "price": d["premium_price"], "months": d["premium_months"],
         "status": "ожидает оплаты", "created_at": datetime.now().isoformat(),
     }
     data["orders"][order_id] = order
@@ -503,24 +542,19 @@ async def cb_premium_pay_crypto(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сессия устарела, выберите подписку заново", show_alert=True)
         await edit_screen(callback, "💎 Раздел Premium:", reply_markup=premium_menu_kb())
         return
-
     if crypto is None:
         await callback.answer("CryptoBot не подключён", show_alert=True)
         return
 
     crypto_price = rub_to_usdt(d["premium_price"])
-
-    invoice = await crypto.create_invoice(
-        asset="USDT",
-        amount=str(crypto_price)
-    )
+    invoice = await crypto.create_invoice(asset="USDT", amount=str(crypto_price))
 
     order_id = str(uuid.uuid4())
     order = {
         "id": order_id, "type": "premium", "user_id": str(callback.from_user.id),
         "username": callback.from_user.username or "",
         "recipient": f"@{callback.from_user.username}" if callback.from_user.username else str(callback.from_user.id),
-        "label": d["premium_label"], "price": d["premium_price"],
+        "label": d["premium_label"], "price": d["premium_price"], "months": d["premium_months"],
         "status": "ожидает оплаты (crypto)", "created_at": datetime.now().isoformat(),
     }
     data["orders"][order_id] = order
@@ -609,9 +643,7 @@ async def cb_referral(callback: CallbackQuery):
     user = get_user(data, callback.from_user.id)
     bot_info = await bot.get_me()
     link = f"https://t.me/{bot_info.username}?start=ref_{callback.from_user.id}"
-
     current_balance = user["referral_earned"] - user["referral_withdrawn"]
-
     text = (
         f"👥 Реферальная система\n\n"
         f"🔗 Ваша реферальная ссылка:\n{link}\n\n"
@@ -622,7 +654,6 @@ async def cb_referral(callback: CallbackQuery):
         f"⭐ Текущий баланс: {current_balance:.2f} звёзд\n\n"
         f"Минимальная сумма вывода: {MIN_WITHDRAW} звёзд"
     )
-
     await edit_screen(callback, text, reply_markup=referral_kb())
     await callback.answer()
 
@@ -697,24 +728,52 @@ async def cmd_confirm(message: Message):
         await message.answer("Заказ не найден.")
         return
     found["status"] = "оплачено"
+    save_data(data)
 
     if found.get("type") == "premium":
-        save_data(data)
-        await bot.send_message(
-            int(found["user_id"]),
-            f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) скоро будет активирован.",
-        )
+        months = found.get("months", 3)
+        await message.answer(f"Заказ {args[1]} подтверждён. Отправляю Premium через Fragment...")
+        ok, details = await fragment_send_premium(found["recipient"], months)
+        if ok:
+            found["status"] = "выполнено"
+            save_data(data)
+            await message.answer(f"✅ Premium отправлен автоматически! {details}")
+            await bot.send_message(
+                int(found["user_id"]),
+                f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) отправлен на {found['recipient']}.",
+            )
+        else:
+            found["status"] = "оплачено (нужна ручная отправка)"
+            save_data(data)
+            await message.answer(f"⚠️ Не удалось отправить автоматически: {details}\nОтправь Premium вручную получателю {found['recipient']}.")
+            await bot.send_message(
+                int(found["user_id"]),
+                f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) скоро будет активирован.",
+            )
     else:
         buyer_id = int(found["user_id"])
         buyer = get_user(data, buyer_id)
         buyer["total_bought"] += found["amount"]
         save_data(data)
-        await bot.send_message(
-            buyer_id,
-            f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} отправлено.",
-        )
 
-    await message.answer(f"Заказ {args[1]} подтверждён.")
+        await message.answer(f"Заказ {args[1]} подтверждён. Отправляю {found['amount']}⭐ через Fragment...")
+        ok, details = await fragment_send_stars(found["recipient"], found["amount"])
+        if ok:
+            found["status"] = "выполнено"
+            save_data(data)
+            await message.answer(f"✅ Звёзды отправлены автоматически! {details}")
+            await bot.send_message(
+                buyer_id,
+                f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} отправлено на {found['recipient']}.",
+            )
+        else:
+            found["status"] = "оплачено (нужна ручная отправка)"
+            save_data(data)
+            await message.answer(f"⚠️ Не удалось отправить автоматически: {details}\nОтправь {found['amount']}⭐ вручную получателю {found['recipient']}.")
+            await bot.send_message(
+                buyer_id,
+                f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} скоро будет отправлено.",
+            )
 
 @router.message(Command("confirm_withdraw"))
 async def cmd_confirm_withdraw(message: Message):

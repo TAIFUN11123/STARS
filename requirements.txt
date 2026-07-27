@@ -2,3 +2,4 @@ aiogram
 aiohttp
 aiohttp-socks
 aiocryptopay
+pyfragment

@@ -41,7 +41,7 @@ CARD_NUMBER = "2200 7021 6855 9784"
 CARD_BANK = "Т-Банк (Тинькофф)"
 CARD_HOLDER = "ЮСУФ Н."
 
-BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo.png"
+BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
 
 DATA_FILE = "data.json"
 

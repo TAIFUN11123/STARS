@@ -20,12 +20,18 @@ from aiogram.types import (
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
-ADMIN_ID = 1800089290                    # <-- твой Telegram ID (узнать у @userinfobot)
+
+# Список ID администраторов, которые могут подтверждать заказы и выводы.
+# Чтобы добавить ещё одного - просто впиши его ID через запятую.
+ADMIN_IDS = [1800089290, 8278827530]  # <-- впиши сюда все ID через запятую
+ADMIN_IDS = list(dict.fromkeys(ADMIN_IDS))  # убираем случайные дубликаты
+ADMIN_ID = ADMIN_IDS[0]  # используется как получатель уведомлений о новых заказах/выводах
+
 PROXY_URL = ""  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
 
 # ---- Fragment (автоматическая отправка звёзд/Premium) ----
-TON_SEED = os.getenv("TON_SEED")                    # 24 слова seed-фразы кошелька, через пробел
-TONAPI_KEY = os.getenv("TONAPI_KEY")                # ключ с tonconsole.com
+TON_SEED = os.getenv("TON_SEED")
+TONAPI_KEY = os.getenv("TONAPI_KEY")
 FRAGMENT_SSID = os.getenv("FRAGMENT_SSID")
 FRAGMENT_DT = os.getenv("FRAGMENT_DT")
 FRAGMENT_TOKEN = os.getenv("FRAGMENT_TOKEN")
@@ -37,7 +43,6 @@ CARD_NUMBER = "2200 7021 6855 9784"
 CARD_BANK = "Т-Банк (Тинькофф)"
 CARD_HOLDER = "ЮСУФ Н."
 
-# Картинка-баннер, которая прикрепляется к каждому сообщению бота.
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo.png"
 
 DATA_FILE = "data.json"
@@ -46,10 +51,10 @@ PRICES = {
     50: 85, 100: 170, 150: 255, 200: 340, 250: 425,
     300: 510, 500: 850, 750: 1275, 1000: 1700, 5000: 8500,
 }
-RATE = 1.70  # руб за 1 звезду (для произвольного количества)
+RATE = 1.70
 
-CRYPTO_STAR_RATE = 0.0218  # USDT за 1 звезду
-CRYPTO_RUB_RATE = RATE / CRYPTO_STAR_RATE  # ~77.98 руб за 1 USDT
+CRYPTO_STAR_RATE = 0.0218
+CRYPTO_RUB_RATE = RATE / CRYPTO_STAR_RATE
 
 def stars_to_usdt(amount: int) -> float:
     return round(amount * CRYPTO_STAR_RATE, 2)
@@ -68,6 +73,9 @@ REFERRAL_BONUS = 1.2
 
 MIN_USERNAME_LEN = 5
 MAX_USERNAME_LEN = 32
+
+# Статусы заказа, которые считаются "ещё не подтверждён" (можно подтвердить)
+PENDING_STATUSES = {"ожидает оплаты", "ожидает оплаты (crypto)", "чек отправлен, ожидает проверки"}
 
 # ==================== ХРАНИЛИЩЕ ====================
 
@@ -103,6 +111,9 @@ data.setdefault("withdrawals", {})
 def is_valid_username(text: str) -> bool:
     name = text.strip().lstrip("@")
     return MIN_USERNAME_LEN <= len(name) <= MAX_USERNAME_LEN
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 # ==================== FSM ====================
 
@@ -202,12 +213,8 @@ async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
         await callback.message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
 
 # -------------------- FRAGMENT: АВТОМАТИЧЕСКАЯ ОТПРАВКА --------------------
-# Использует библиотеку pyfragment (pip install pyfragment).
-# Работает ЛОКАЛЬНО - seed-фраза используется только у тебя на сервере,
-# никуда на сторону не передаётся.
 
 async def fragment_send_stars(recipient: str, amount: int):
-    """Покупает и отправляет звёзды через Fragment. Возвращает (успех: bool, детали: str)."""
     if not FRAGMENT_ENABLED:
         return False, "Fragment не настроен (нет переменных окружения)"
     try:
@@ -225,16 +232,12 @@ async def fragment_send_stars(recipient: str, amount: int):
             },
             wallet_version="V4R2",
         ) as client:
-           result = await client.purchase_stars(
-    recipient,
-    amount=amount,
-    payment_method=PaymentMethod.GRAM
-)
+            result = await client.purchase_stars(recipient, amount=amount, payment_method=PaymentMethod.GRAM)
+            return True, f"tx: {getattr(result, 'transaction_id', 'ok')}"
     except Exception as e:
         return False, str(e)
 
 async def fragment_send_premium(recipient: str, months: int):
-    """Покупает и отправляет Premium через Fragment. Возвращает (успех: bool, детали: str)."""
     if not FRAGMENT_ENABLED:
         return False, "Fragment не настроен (нет переменных окружения)"
     try:
@@ -472,9 +475,17 @@ async def process_receipt(message: Message, state: FSMContext):
         f"Подтвердить: /confirm {order['id'][:8]}"
     )
     if message.photo:
-        await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption)
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_photo(admin_id, message.photo[-1].file_id, caption=caption)
+            except Exception:
+                pass
     else:
-        await bot.send_document(ADMIN_ID, message.document.file_id, caption=caption)
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_document(admin_id, message.document.file_id, caption=caption)
+            except Exception:
+                pass
 
     order["status"] = "чек отправлен, ожидает проверки"
     save_data(data)
@@ -593,9 +604,17 @@ async def process_premium_receipt(message: Message, state: FSMContext):
         f"Подтвердить: /confirm {order['id'][:8]}"
     )
     if message.photo:
-        await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=caption)
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_photo(admin_id, message.photo[-1].file_id, caption=caption)
+            except Exception:
+                pass
     else:
-        await bot.send_document(ADMIN_ID, message.document.file_id, caption=caption)
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_document(admin_id, message.document.file_id, caption=caption)
+            except Exception:
+                pass
 
     order["status"] = "чек отправлен, ожидает проверки"
     save_data(data)
@@ -700,14 +719,18 @@ async def process_withdraw(message: Message, state: FSMContext):
     }
     save_data(data)
 
-    await bot.send_message(
-        ADMIN_ID,
-        f"💸 Запрос на вывод №{withdraw_id[:8]}\n"
-        f"От: @{message.from_user.username or message.from_user.id}\n"
-        f"Сумма: {current_balance:.2f} звёзд\n"
-        f"Реквизиты: {message.text}\n\n"
-        f"Подтвердить: /confirm_withdraw {withdraw_id[:8]}"
-    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"💸 Запрос на вывод №{withdraw_id[:8]}\n"
+                f"От: @{message.from_user.username or message.from_user.id}\n"
+                f"Сумма: {current_balance:.2f} звёзд\n"
+                f"Реквизиты: {message.text}\n\n"
+                f"Подтвердить: /confirm_withdraw {withdraw_id[:8]}"
+            )
+        except Exception:
+            pass
 
     await state.clear()
     await send_screen(
@@ -720,7 +743,7 @@ async def process_withdraw(message: Message, state: FSMContext):
 
 @router.message(Command("confirm"))
 async def cmd_confirm(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     args = message.text.split()
     if len(args) < 2:
@@ -730,12 +753,24 @@ async def cmd_confirm(message: Message):
     if not found:
         await message.answer("Заказ не найден.")
         return
+
+    # ---- Защита от двойного подтверждения ----
+    if found["status"] not in PENDING_STATUSES:
+        who = found.get("confirmed_by")
+        who_text = f" администратором {who}" if who else ""
+        await message.answer(
+            f"⚠️ Этот заказ уже обработан{who_text}.\n"
+            f"Текущий статус: «{found['status']}»"
+        )
+        return
+
     found["status"] = "оплачено"
+    found["confirmed_by"] = message.from_user.id
     save_data(data)
 
     if found.get("type") == "premium":
         months = found.get("months", 3)
-        await message.answer(f"Заказ {args[1]} подтверждён. Отправляю Premium через Fragment...")
+        await message.answer(f"Заказ {args[1]} подтверждён вами. Отправляю Premium через Fragment...")
         ok, details = await fragment_send_premium(found["recipient"], months)
         if ok:
             found["status"] = "выполнено"
@@ -759,7 +794,7 @@ async def cmd_confirm(message: Message):
         buyer["total_bought"] += found["amount"]
         save_data(data)
 
-        await message.answer(f"Заказ {args[1]} подтверждён. Отправляю {found['amount']}⭐ через Fragment...")
+        await message.answer(f"Заказ {args[1]} подтверждён вами. Отправляю {found['amount']}⭐ через Fragment...")
         ok, details = await fragment_send_stars(found["recipient"], found["amount"])
         if ok:
             found["status"] = "выполнено"
@@ -780,7 +815,7 @@ async def cmd_confirm(message: Message):
 
 @router.message(Command("confirm_withdraw"))
 async def cmd_confirm_withdraw(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     args = message.text.split()
     if len(args) < 2:
@@ -791,12 +826,74 @@ async def cmd_confirm_withdraw(message: Message):
     if not found:
         await message.answer("Заявка на вывод не найдена.")
         return
+
+    # ---- Защита от двойного подтверждения ----
+    if found["status"] != "ожидает выплаты":
+        who = found.get("confirmed_by")
+        who_text = f" администратором {who}" if who else ""
+        await message.answer(
+            f"⚠️ Этот вывод уже обработан{who_text}.\n"
+            f"Текущий статус: «{found['status']}»"
+        )
+        return
+
     user = get_user(data, found["user_id"])
     user["referral_withdrawn"] += found["amount"]
     found["status"] = "выплачено"
+    found["confirmed_by"] = message.from_user.id
     save_data(data)
     await bot.send_message(int(found["user_id"]), f"✅ Ваш вывод №{found['id'][:8]} на {found['amount']:.2f} звёзд выполнен.")
-    await message.answer(f"Вывод {args[1]} подтверждён.")
+    await message.answer(f"Вывод {args[1]} подтверждён вами.")
+
+# -------------------- ДИАГНОСТИКА (ТОЛЬКО ДЛЯ АДМИНОВ) --------------------
+
+@router.message(Command("checkenv"))
+async def cmd_check_env(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    seed_words = len(TON_SEED.split()) if TON_SEED else 0
+    await message.answer(
+        f"TON_SEED задан: {'да' if TON_SEED else 'НЕТ'}\n"
+        f"Количество слов в TON_SEED: {seed_words} (должно быть 24)\n"
+        f"TONAPI_KEY задан: {'да' if TONAPI_KEY else 'НЕТ'}\n"
+        f"FRAGMENT_SSID задан: {'да' if FRAGMENT_SSID else 'НЕТ'}\n"
+        f"FRAGMENT_DT задан: {'да' if FRAGMENT_DT else 'НЕТ'}\n"
+        f"FRAGMENT_TOKEN задан: {'да' if FRAGMENT_TOKEN else 'НЕТ'}\n"
+        f"FRAGMENT_TON_TOKEN задан: {'да' if FRAGMENT_TON_TOKEN else 'НЕТ'}\n"
+        f"FRAGMENT_ENABLED: {FRAGMENT_ENABLED}\n"
+        f"Админы: {ADMIN_IDS}"
+    )
+
+@router.message(Command("wallet"))
+async def cmd_wallet_check(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    if not FRAGMENT_ENABLED:
+        await message.answer("Fragment не настроен")
+        return
+    try:
+        from pyfragment import FragmentClient
+        async with FragmentClient(
+            seed=TON_SEED,
+            api_key=TONAPI_KEY,
+            cookies={
+                "stel_ssid": FRAGMENT_SSID,
+                "stel_dt": FRAGMENT_DT,
+                "stel_token": FRAGMENT_TOKEN,
+                "stel_ton_token": FRAGMENT_TON_TOKEN,
+            },
+            wallet_version="V4R2",
+        ) as client:
+            wallet = await client.get_wallet()
+            await message.answer(
+                f"Адрес: {wallet.address}\n"
+                f"TON: {wallet.gram_balance}\n"
+                f"USDT: {wallet.usdt_balance}"
+            )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+# -------------------- ЗАПУСК --------------------
 
 async def main():
     await bot.set_my_commands([

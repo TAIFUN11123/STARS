@@ -21,7 +21,7 @@ from aiogram.types import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
 
-ADMIN_IDS = [1800089290 8278827530]  # <-- впиши сюда все ID через запятую
+ADMIN_IDS = [1800089290, 8278827530]  # <-- впиши сюда все ID через запятую
 ADMIN_IDS = list(dict.fromkeys(ADMIN_IDS))
 ADMIN_ID = ADMIN_IDS[0]
 

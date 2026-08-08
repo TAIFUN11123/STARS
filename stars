@@ -730,7 +730,7 @@ async def cb_withdraw(callback: CallbackQuery, state: FSMContext):
     await edit_screen(
         callback,
         f"💸 Вывод {current_balance:.2f} звёзд\n\n"
-        f"Отправьте @username Telegram, куда перевести звёзды (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов, только юзернейм):",
+        f"Отправьте юзернейм Telegram (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов):",
         reply_markup=back_kb(),
     )
     await callback.answer()

@@ -746,10 +746,7 @@ async def process_withdraw(message: Message, state: FSMContext):
 
     raw = message.text.strip()
     if not is_valid_username(raw):
-        await message.answer(
-            f"⚠️ Это должен быть именно юзернейм Telegram (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов), "
-            "без номеров карт и прочих реквизитов.\nОтправьте @username ещё раз:"
-        )
+        await message.answer("⚠️ Неверный юзернейм Telegram. Отправьте юзернейм ещё раз:")
         return
     requisites = raw if raw.startswith("@") else "@" + raw
 

@@ -42,6 +42,7 @@ CARD_BANK = "Т-Банк (Тинькофф)"
 CARD_HOLDER = "ЮСУФ Н."
 
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
+REVIEW_URL = "https://t.me/TaifunSh"  # ссылка на пост, где оставляют отзывы в комментариях
 
 # ---- ХРАНЕНИЕ ДАННЫХ ----
 # Путь можно переопределить переменной окружения DATA_FILE, чтобы указать
@@ -147,6 +148,7 @@ class PremiumStates(StatesGroup):
     waiting_receipt = State()
 
 class WithdrawStates(StatesGroup):
+    entering_amount = State()
     entering_requisites = State()
 
 class AdminGiveStates(StatesGroup):
@@ -245,6 +247,15 @@ def admin_panel_kb():
 
 async def send_screen(message: Message, text: str, reply_markup=None):
     await message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
+
+async def send_review_request(user_id: int):
+    try:
+        await bot.send_message(
+            user_id,
+            f"🙏 Будем очень признательны, если оставите отзыв о покупке в комментариях к посту:\n{REVIEW_URL}",
+        )
+    except Exception:
+        pass
 
 async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
     try:
@@ -726,21 +737,51 @@ async def cb_withdraw(callback: CallbackQuery, state: FSMContext):
             show_alert=True,
         )
         return
-    await state.set_state(WithdrawStates.entering_requisites)
+    await state.set_state(WithdrawStates.entering_amount)
     await edit_screen(
         callback,
-        f"💸 Вывод {current_balance:.2f} звёзд\n\n"
-        f"Отправьте юзернейм Telegram (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов):",
+        f"💸 Вывод звёзд\n\n"
+        f"Ваш баланс: {current_balance:.2f} ⭐\n"
+        f"Минимум для вывода: {MIN_WITHDRAW} ⭐\n\n"
+        f"Введите количество звёзд, которое хотите вывести:",
         reply_markup=back_kb(),
     )
     await callback.answer()
+
+@router.message(WithdrawStates.entering_amount)
+async def process_withdraw_amount(message: Message, state: FSMContext):
+    user = get_user(data, message.from_user.id)
+    current_balance = user["referral_earned"] - user["referral_withdrawn"]
+    if current_balance < MIN_WITHDRAW:
+        await message.answer(f"❌ Недостаточно звёзд для вывода. Ваш баланс: {current_balance:.2f} ⭐")
+        await state.clear()
+        return
+
+    text = message.text.strip().replace(",", ".")
+    if not text.replace(".", "", 1).isdigit():
+        await message.answer("⚠️ Введите корректное число, например 50 или 120:")
+        return
+
+    amount = float(text)
+    if amount < MIN_WITHDRAW:
+        await message.answer(f"⚠️ Минимальная сумма для вывода — {MIN_WITHDRAW} ⭐. Введите количество ещё раз:")
+        return
+    if amount > current_balance:
+        await message.answer(f"⚠️ У вас недостаточно звёзд. Ваш баланс: {current_balance:.2f} ⭐. Введите количество ещё раз:")
+        return
+
+    await state.update_data(withdraw_amount=amount)
+    await state.set_state(WithdrawStates.entering_requisites)
+    await message.answer(f"Отправьте юзернейм Telegram (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов):")
 
 @router.message(WithdrawStates.entering_requisites)
 async def process_withdraw(message: Message, state: FSMContext):
     user = get_user(data, message.from_user.id)
     current_balance = user["referral_earned"] - user["referral_withdrawn"]
-    if current_balance < MIN_WITHDRAW:
-        await message.answer(f"❌ Недостаточно звёзд для вывода. Ваш баланс: {current_balance:.2f} ⭐")
+    d = await state.get_data()
+    amount = d.get("withdraw_amount")
+    if amount is None or amount > current_balance:
+        await message.answer("⚠️ Сессия устарела или баланс изменился, начните вывод заново.")
         await state.clear()
         return
 
@@ -755,7 +796,7 @@ async def process_withdraw(message: Message, state: FSMContext):
         "id": withdraw_id,
         "user_id": str(message.from_user.id),
         "username": message.from_user.username or "",
-        "amount": current_balance,
+        "amount": amount,
         "requisites": requisites,
         "status": "ожидает выплаты",
         "created_at": datetime.now().isoformat(),
@@ -769,7 +810,7 @@ async def process_withdraw(message: Message, state: FSMContext):
                 admin_id,
                 f"💸 Запрос на вывод №{withdraw_id[:8]}\n"
                 f"От: @{message.from_user.username or message.from_user.id}\n"
-                f"Сумма: {current_balance:.2f} звёзд\n"
+                f"Сумма: {amount:.2f} звёзд\n"
                 f"Юзернейм для перевода: {requisites}",
                 reply_markup=kb,
             )
@@ -887,6 +928,7 @@ async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_
                 int(found["user_id"]),
                 f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) отправлен на {found['recipient']}.",
             )
+            await send_review_request(int(found["user_id"]))
         else:
             found["status"] = "оплачено (нужна ручная отправка)"
             save_data(data)
@@ -895,6 +937,7 @@ async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_
                 int(found["user_id"]),
                 f"✅ Заказ №{found['id'][:8]} подтверждён! 💎 Premium ({found['label']}) скоро будет активирован.",
             )
+            await send_review_request(int(found["user_id"]))
     else:
         buyer_id = int(found["user_id"])
         buyer = get_user(data, buyer_id)
@@ -911,6 +954,7 @@ async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_
                 buyer_id,
                 f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} отправлено на {found['recipient']}.",
             )
+            await send_review_request(buyer_id)
         else:
             found["status"] = "оплачено (нужна ручная отправка)"
             save_data(data)
@@ -919,6 +963,7 @@ async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_
                 buyer_id,
                 f"✅ Заказ №{found['id'][:8]} подтверждён! ⭐ {found['amount']} скоро будет отправлено.",
             )
+            await send_review_request(buyer_id)
 
 async def process_order_decline(order_id_prefix: str, admin_id: int, reply_func):
     found = find_order(order_id_prefix)

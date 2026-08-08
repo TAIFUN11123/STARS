@@ -43,7 +43,10 @@ CARD_HOLDER = "ЮСУФ Н."
 
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
 
-DATA_FILE = "data.json"
+# ---- ХРАНЕНИЕ ДАННЫХ ----
+# Путь можно переопределить переменной окружения DATA_FILE, чтобы указать
+# на постоянный диск/volume (иначе данные будут теряться при пересборке/деплое!)
+DATA_FILE = os.getenv("DATA_FILE", "data.json")
 
 PRICES = {
     50: 85, 100: 170, 150: 255, 200: 340, 250: 425,
@@ -83,19 +86,26 @@ def load_data():
     return {"users": {}, "orders": {}, "withdrawals": {}}
 
 def save_data(d):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+    # Атомарная запись: сначала во временный файл, потом переименование.
+    # Это защищает data.json от повреждения, если процесс упадёт/перезапустится
+    # прямо во время записи.
+    tmp_file = DATA_FILE + ".tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_file, DATA_FILE)
 
 def get_user(d, user_id):
     uid = str(user_id)
     if uid not in d["users"]:
         d["users"][uid] = {
+            "username": "",
             "total_bought": 0,
             "referrals": [],
             "referral_earned": 0,
             "referral_withdrawn": 0,
         }
     u = d["users"][uid]
+    u.setdefault("username", "")
     u.setdefault("total_bought", 0)
     u.setdefault("referrals", [])
     u.setdefault("referral_earned", 0)
@@ -115,6 +125,14 @@ def is_admin(user_id: int) -> bool:
 def find_order(order_prefix: str):
     return next((o for oid, o in data["orders"].items() if oid.startswith(order_prefix)), None)
 
+def find_user_id_by_username(username: str):
+    """Ищет user_id по username среди тех, кто хотя бы раз запускал бота."""
+    username = username.strip().lstrip("@").lower()
+    for uid, u in data["users"].items():
+        if (u.get("username") or "").lower() == username:
+            return uid
+    return None
+
 # ==================== FSM ====================
 
 class BuyStates(StatesGroup):
@@ -130,6 +148,10 @@ class PremiumStates(StatesGroup):
 
 class WithdrawStates(StatesGroup):
     entering_requisites = State()
+
+class AdminGiveStates(StatesGroup):
+    entering_username = State()
+    entering_amount = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -211,6 +233,12 @@ def admin_withdraw_kb(withdraw_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Принять", callback_data=f"adw_ok_{short}"),
          InlineKeyboardButton(text="❌ Отказаться", callback_data=f"adw_no_{short}")],
+    ])
+
+def admin_panel_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Начислить звёзды рефералу", callback_data="admin_give_stars")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
     ])
 
 # -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
@@ -308,7 +336,10 @@ async def show_main_menu(message: Message):
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    get_user(data, message.from_user.id)
+    user = get_user(data, message.from_user.id)
+    # Сохраняем/обновляем username, чтобы админ мог находить пользователя по нему
+    user["username"] = message.from_user.username or ""
+    save_data(data)
 
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
@@ -746,6 +777,79 @@ async def process_withdraw(message: Message, state: FSMContext):
         reply_markup=main_menu_kb(),
     )
 
+# -------------------- АДМИН-ПАНЕЛЬ: НАЧИСЛЕНИЕ ЗВЁЗД ВРУЧНУЮ --------------------
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await send_screen(message, "🛠 Админ-панель", reply_markup=admin_panel_kb())
+
+@router.callback_query(F.data == "admin_give_stars")
+async def cb_admin_give_stars(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    await state.set_state(AdminGiveStates.entering_username)
+    await edit_screen(
+        callback,
+        "✏️ Введите @username пользователя (или его числовой ID), которому начислить звёзды на реферальный баланс:",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+
+@router.message(AdminGiveStates.entering_username)
+async def process_admin_username(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    raw = message.text.strip().lstrip("@")
+    target_id = find_user_id_by_username(raw)
+    if not target_id and raw.isdigit():
+        target_id = raw
+    if not target_id:
+        await message.answer(
+            "⚠️ Пользователь не найден в базе (он должен хотя бы раз запускать бота через /start).\n"
+            "Попробуйте ещё раз или отправьте его числовой Telegram ID:"
+        )
+        return
+    await state.update_data(target_id=target_id, target_username=raw)
+    await state.set_state(AdminGiveStates.entering_amount)
+    await message.answer(f"✏️ Сколько звёзд начислить пользователю {raw}? (введите число, например 50 или 12.5)")
+
+@router.message(AdminGiveStates.entering_amount)
+async def process_admin_amount(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip().replace(",", ".")
+    if not text.replace(".", "", 1).isdigit():
+        await message.answer("⚠️ Введите корректное число, например 50 или 12.5:")
+        return
+
+    amount = float(text)
+    d = await state.get_data()
+    target_id = d["target_id"]
+    target_username = d["target_username"]
+
+    user = get_user(data, target_id)
+    user["referral_earned"] += amount
+    save_data(data)
+
+    await state.clear()
+    await send_screen(
+        message,
+        f"✅ Начислено {amount:.2f} ⭐ пользователю {target_username} на реферальный баланс.",
+        reply_markup=main_menu_kb(),
+    )
+
+    try:
+        await bot.send_message(
+            int(target_id),
+            f"🎁 Администратор начислил вам {amount:.2f} ⭐ на реферальный баланс!"
+        )
+    except Exception:
+        pass
+
 # -------------------- ЛОГИКА ПОДТВЕРЖДЕНИЯ ЗАКАЗА (используется и командой, и кнопкой) --------------------
 
 async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_func):
@@ -1009,7 +1113,8 @@ async def cmd_check_env(message: Message):
         f"FRAGMENT_TOKEN задан: {'да' if FRAGMENT_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_TON_TOKEN задан: {'да' if FRAGMENT_TON_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_ENABLED: {FRAGMENT_ENABLED}\n"
-        f"Админы: {ADMIN_IDS}"
+        f"Админы: {ADMIN_IDS}\n"
+        f"Файл данных: {DATA_FILE}"
     )
 
 @router.message(Command("wallet"))

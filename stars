@@ -730,7 +730,7 @@ async def cb_withdraw(callback: CallbackQuery, state: FSMContext):
     await edit_screen(
         callback,
         f"💸 Вывод {current_balance:.2f} звёзд\n\n"
-        "Отправьте реквизиты для вывода (номер карты или @username для перевода звёздами):",
+        f"Отправьте @username Telegram, куда перевести звёзды (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов, только юзернейм):",
         reply_markup=back_kb(),
     )
     await callback.answer()
@@ -744,13 +744,22 @@ async def process_withdraw(message: Message, state: FSMContext):
         await state.clear()
         return
 
+    raw = message.text.strip()
+    if not is_valid_username(raw):
+        await message.answer(
+            f"⚠️ Это должен быть именно юзернейм Telegram (от {MIN_USERNAME_LEN} до {MAX_USERNAME_LEN} символов), "
+            "без номеров карт и прочих реквизитов.\nОтправьте @username ещё раз:"
+        )
+        return
+    requisites = raw if raw.startswith("@") else "@" + raw
+
     withdraw_id = str(uuid.uuid4())
     data["withdrawals"][withdraw_id] = {
         "id": withdraw_id,
         "user_id": str(message.from_user.id),
         "username": message.from_user.username or "",
         "amount": current_balance,
-        "requisites": message.text,
+        "requisites": requisites,
         "status": "ожидает выплаты",
         "created_at": datetime.now().isoformat(),
     }
@@ -764,7 +773,7 @@ async def process_withdraw(message: Message, state: FSMContext):
                 f"💸 Запрос на вывод №{withdraw_id[:8]}\n"
                 f"От: @{message.from_user.username or message.from_user.id}\n"
                 f"Сумма: {current_balance:.2f} звёзд\n"
-                f"Реквизиты: {message.text}",
+                f"Юзернейм для перевода: {requisites}",
                 reply_markup=kb,
             )
         except Exception:

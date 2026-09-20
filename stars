@@ -4,6 +4,7 @@ import os
 import ssl
 import uuid
 from datetime import datetime
+from html import escape as esc
 from aiogram import Bot, Dispatcher, F, Router
 from aiocryptopay import AioCryptoPay, Networks
 from aiogram.filters import Command, CommandStart
@@ -43,6 +44,27 @@ CARD_HOLDER = "ЮСУФ Н."
 
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
 REVIEW_URL = "https://t.me/TaifunSh"  # ссылка на пост, где оставляют отзывы в комментариях
+
+# ---- ОФОРМЛЕНИЕ: премиум-эмодзи и цветные кнопки ----
+# Премиум-эмодзи работают только если у аккаунта-владельца бота есть Telegram Premium.
+# Если эмодзи не отображаются или бот ругается на кнопки — добавь переменную
+# окружения CUSTOM_EMOJI=0 (вернутся обычные эмодзи) и/или BUTTON_COLORS=0 (кнопки без цвета).
+CUSTOM_EMOJI = os.getenv("CUSTOM_EMOJI", "1") == "1"
+BUTTON_COLORS = os.getenv("BUTTON_COLORS", "1") == "1"
+
+# ID премиум-эмодзи
+EMOJI_STAR = "5954135079662916434"       # звезда (цены, купить, отзывы, баланс, приобретено)
+EMOJI_GREET = "5348343042212381365"      # приветствие
+EMOJI_SHOP = "5920332557466997677"       # "Я бот для покупки..."
+EMOJI_REFERRAL = "5879905000972358125"   # реферальная система
+EMOJI_SUPPORT = "5904248647972820334"    # поддержка
+EMOJI_PREMIUM = "5773677501825945508"    # premium
+EMOJI_CABINET = "6032608126480421344"    # личный кабинет / профиль
+EMOJI_BALANCE = "5769126056262898415"    # ваш баланс
+EMOJI_USERID = "5884366771913233289"     # твой айди
+EMOJI_SINCE = "5776233299424843260"      # в боте с
+EMOJI_RANK = "5805553606635559688"       # вы занимаете место
+EMOJI_HISTORY = "6041730074376410123"    # история заказов
 
 # ---- ХРАНЕНИЕ ДАННЫХ ----
 # Путь можно переопределить переменной окружения DATA_FILE, чтобы указать
@@ -111,6 +133,14 @@ def get_user(d, user_id):
     u.setdefault("referrals", [])
     u.setdefault("referral_earned", 0)
     u.setdefault("referral_withdrawn", 0)
+    # Дата первого появления в боте (для экрана «Профиль»).
+    # Для старых пользователей берём дату первого заказа, если он есть.
+    if "registered_at" not in u:
+        dates = [
+            o.get("created_at") for o in d.get("orders", {}).values()
+            if o.get("user_id") == uid and o.get("created_at")
+        ]
+        u["registered_at"] = (min(dates) if dates else datetime.now().isoformat())[:10]
     return u
 
 data = load_data()
@@ -133,6 +163,11 @@ def find_user_id_by_username(username: str):
         if (u.get("username") or "").lower() == username:
             return uid
     return None
+
+def get_rank(user: dict) -> int:
+    """Место пользователя по количеству купленных звёзд (у равных значений одинаковое место)."""
+    mine = user.get("total_bought", 0)
+    return 1 + sum(1 for u in data["users"].values() if u.get("total_bought", 0) > mine)
 
 # ==================== FSM ====================
 
@@ -157,22 +192,52 @@ class AdminGiveStates(StatesGroup):
 
 # ==================== КЛАВИАТУРЫ ====================
 
+def ce(emoji_id: str, fallback: str) -> str:
+    """Премиум-эмодзи для HTML-текста. Если премиум-эмодзи выключены — обычный эмодзи."""
+    if CUSTOM_EMOJI:
+        return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    return fallback
+
+def btn(text, callback_data=None, url=None, style=None, icon=None, fallback=""):
+    """Кнопка с премиум-эмодзи (icon) и цветом (style: primary/success/danger)."""
+    params = {}
+    if callback_data:
+        params["callback_data"] = callback_data
+    if url:
+        params["url"] = url
+    if style and BUTTON_COLORS:
+        params["style"] = style
+    if icon and CUSTOM_EMOJI:
+        params["icon_custom_emoji_id"] = icon
+        label = text
+    else:
+        label = f"{fallback} {text}" if fallback else text
+    return InlineKeyboardButton(text=label, **params)
+
 def main_menu_kb():
     kb = [
-        [InlineKeyboardButton(text="⭐ Купить", callback_data="buy"),
-         InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
-        [InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
-        [InlineKeyboardButton(text="👥 Реферальная система", callback_data="referral")],
-        [InlineKeyboardButton(text="📋 FAQ", callback_data="faq")],
-        [InlineKeyboardButton(text="⭐ Отзывы", url="https://t.me/TaifunSh")],
-        [InlineKeyboardButton(text="📜 История заказов", callback_data="history")],
+        [btn("Купить", callback_data="buy", style="success", icon=EMOJI_STAR, fallback="⭐"),
+         btn("Premium", callback_data="premium", icon=EMOJI_PREMIUM, fallback="💎")],
+        [btn("Профиль", callback_data="profile", icon=EMOJI_CABINET, fallback="👤")],
+        [btn("Реферальная система", callback_data="referral", icon=EMOJI_REFERRAL, fallback="👥")],
+        [btn("Поддержка", callback_data="faq", icon=EMOJI_SUPPORT, fallback="🆘")],
+        [btn("Отзывы", url=REVIEW_URL, icon=EMOJI_STAR, fallback="⭐")],
+        [btn("История заказов", callback_data="history", icon=EMOJI_HISTORY, fallback="📜")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def profile_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Вывести", callback_data="withdraw"),
+         btn("История заказов", callback_data="history", icon=EMOJI_HISTORY, fallback="📜")],
+        [btn("Реферальная система", callback_data="referral", icon=EMOJI_REFERRAL, fallback="👥")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
 
 def amounts_kb():
     kb, row = [], []
     for amount, price in PRICES.items():
-        row.append(InlineKeyboardButton(text=f"⭐ {amount} - {price}₽", callback_data=f"amt_{amount}"))
+        row.append(btn(f"{amount} - {price}₽", callback_data=f"amt_{amount}", icon=EMOJI_STAR, fallback="⭐"))
         if len(row) == 2:
             kb.append(row); row = []
     if row:
@@ -244,9 +309,12 @@ def admin_panel_kb():
     ])
 
 # -------------------- ХЕЛПЕРЫ ДЛЯ ОТПРАВКИ С КАРТИНКОЙ --------------------
+# use_html=True нужно только для экранов, где в тексте есть премиум-эмодзи / цитата.
+# Все остальные экраны отправляются как обычный текст (как раньше).
 
-async def send_screen(message: Message, text: str, reply_markup=None):
-    await message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
+async def send_screen(message: Message, text: str, reply_markup=None, use_html: bool = False):
+    kwargs = {"parse_mode": "HTML"} if use_html else {}
+    await message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup, **kwargs)
 
 async def send_review_request(user_id: int):
     try:
@@ -257,13 +325,14 @@ async def send_review_request(user_id: int):
     except Exception:
         pass
 
-async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None):
+async def edit_screen(callback: CallbackQuery, text: str, reply_markup=None, use_html: bool = False):
+    kwargs = {"parse_mode": "HTML"} if use_html else {}
     try:
-        media = InputMediaPhoto(media=BANNER_URL, caption=text)
+        media = InputMediaPhoto(media=BANNER_URL, caption=text, **kwargs)
         await callback.message.edit_media(media=media, reply_markup=reply_markup)
     except Exception:
         await callback.message.delete()
-        await callback.message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup)
+        await callback.message.answer_photo(photo=BANNER_URL, caption=text, reply_markup=reply_markup, **kwargs)
 
 # -------------------- FRAGMENT: АВТОМАТИЧЕСКАЯ ОТПРАВКА --------------------
 
@@ -337,12 +406,13 @@ dp.include_router(router)
 # -------------------- СТАРТ / МЕНЮ --------------------
 
 async def show_main_menu(message: Message):
+    name = esc(message.from_user.first_name or "")
     text = (
-        f"🐤 Привет, {message.from_user.first_name}!\n\n"
-        "🕵️ Я бот для покупки Telegram звёзд за рубли\n\n"
-        "🧑‍💻 Для начала покупки используйте /buy или нажмите кнопку ниже"
+        f"{ce(EMOJI_GREET, '✨')} Привет, {name}!\n\n"
+        f"{ce(EMOJI_SHOP, '🏪')} Я бот для покупки Telegram звёзд за рубли\n\n"
+        f"<blockquote><i>{ce(EMOJI_STAR, '⭐')} Для начала покупки используйте /buy или нажмите кнопку ниже</i></blockquote>"
     )
-    await send_screen(message, text, reply_markup=main_menu_kb())
+    await send_screen(message, text, reply_markup=main_menu_kb(), use_html=True)
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -669,23 +739,35 @@ async def process_premium_receipt(message: Message, state: FSMContext):
     await state.clear()
     await send_screen(message, "✅ Чек получен и отправлен на проверку. Спасибо за покупку! 🎉", reply_markup=main_menu_kb())
 
-# -------------------- БАЛАНС / FAQ / ИСТОРИЯ --------------------
+# -------------------- ПРОФИЛЬ / ПОДДЕРЖКА / ИСТОРИЯ --------------------
 
-@router.callback_query(F.data == "balance")
-async def cb_balance(callback: CallbackQuery):
-    user = get_user(data, callback.from_user.id)
+# "balance" оставлен на случай старых сообщений, где ещё висит кнопка «Баланс»
+@router.callback_query(F.data.in_({"profile", "balance"}))
+async def cb_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(data, user_id)
+    save_data(data)
+
     current = user["referral_earned"] - user["referral_withdrawn"]
+    bought = user["total_bought"]
+    usd = round(bought * CRYPTO_STAR_RATE, 1)
+    rank = get_rank(user)
+    star = ce(EMOJI_STAR, "⭐")
+
     text = (
-        f"💰 Баланс (реферальный)\n\n"
-        f"⭐ Текущий баланс: {current:.2f} звёзд\n"
-        f"📊 Всего куплено звёзд (лично вами): {user['total_bought']}"
+        f"{ce(EMOJI_CABINET, '👤')} <b>Личный кабинет</b>\n\n"
+        f"{ce(EMOJI_BALANCE, '💰')} <b>Ваш баланс:</b> {current:.2f} {star}\n"
+        f"<blockquote>{ce(EMOJI_USERID, '🆔')} <b>Твой ID:</b> <code>{user_id}</code>\n"
+        f"{ce(EMOJI_SINCE, '🌐')} <b>В боте с:</b> {user['registered_at']}\n\n"
+        f"За это время вами приобретено {bought} {star} (~{usd}$)</blockquote>\n"
+        f"{ce(EMOJI_RANK, '👑')} Вы занимаете <b>{rank} место</b> по обороту покупок в нашем боте."
     )
-    await edit_screen(callback, text, reply_markup=back_kb())
+    await edit_screen(callback, text, reply_markup=profile_kb(), use_html=True)
     await callback.answer()
 
 @router.callback_query(F.data == "faq")
 async def cb_faq(callback: CallbackQuery):
-    text = "📋 FAQ\n\n🆘 Поддержка: @HelpStarsShop"
+    text = "🆘 Поддержка\n\nНапишите нам: @HelpStarsShop"
     await edit_screen(callback, text, reply_markup=back_kb())
     await callback.answer()
 
@@ -1165,7 +1247,9 @@ async def cmd_check_env(message: Message):
         f"FRAGMENT_TON_TOKEN задан: {'да' if FRAGMENT_TON_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_ENABLED: {FRAGMENT_ENABLED}\n"
         f"Админы: {ADMIN_IDS}\n"
-        f"Файл данных: {DATA_FILE}"
+        f"Файл данных: {DATA_FILE}\n"
+        f"CUSTOM_EMOJI: {CUSTOM_EMOJI}\n"
+        f"BUTTON_COLORS: {BUTTON_COLORS}"
     )
 
 @router.message(Command("wallet"))

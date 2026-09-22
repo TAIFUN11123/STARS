@@ -45,6 +45,10 @@ CARD_HOLDER = "ЮСУФ Н."
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
 REVIEW_URL = "https://t.me/TaifunSh"  # ссылка на пост, где оставляют отзывы в комментариях
 
+# ---- FAQ / юридические ссылки ----
+TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-dlya-Taifstars-bot-09-22-2"
+PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-dlya-taifstars-bot-09-22"
+
 # ---- ОФОРМЛЕНИЕ: премиум-эмодзи и цветные кнопки ----
 # Премиум-эмодзи работают только если у аккаунта-владельца бота есть Telegram Premium.
 # Если эмодзи не отображаются или бот ругается на кнопки — добавь переменную
@@ -305,6 +309,14 @@ def admin_withdraw_kb(withdraw_id: str):
 def admin_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Начислить звёзды рефералу", callback_data="admin_give_stars")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+
+def faq_kb():
+    """Клавиатура раздела поддержки: FAQ-ссылки на соглашение и политику конфиденциальности."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 Пользовательское соглашение", url=TERMS_URL)],
+        [InlineKeyboardButton(text="🔒 Политика конфиденциальности", url=PRIVACY_URL)],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
     ])
 
@@ -767,8 +779,23 @@ async def cb_profile(callback: CallbackQuery):
 
 @router.callback_query(F.data == "faq")
 async def cb_faq(callback: CallbackQuery):
-    text = "🆘 Поддержка\n\nНапишите нам: @HelpStarsShop"
-    await edit_screen(callback, text, reply_markup=back_kb())
+    text = (
+        "🆘 <b>Поддержка</b>\n\n"
+        "❓ <b>Часто задаваемые вопросы:</b>\n\n"
+        "<b>1. Как купить звёзды?</b>\n"
+        "Нажмите «Купить» в главном меню, выберите количество и способ оплаты.\n\n"
+        "<b>2. Как быстро приходят звёзды?</b>\n"
+        "Обычно в течение нескольких минут после подтверждения оплаты администратором.\n\n"
+        "<b>3. Можно купить звёзды другому пользователю?</b>\n"
+        "Да, при оформлении заказа укажите @username получателя.\n\n"
+        "<b>4. Какие способы оплаты доступны?</b>\n"
+        "Перевод на карту (рубли) или CryptoBot (USDT).\n\n"
+        "<b>5. Что делать, если оплата не подтверждается?</b>\n"
+        "Напишите нашему администратору — он поможет разобраться.\n\n"
+        "По всем вопросам: @HelpStarsShop\n\n"
+        "Ниже — документы, регулирующие использование бота:"
+    )
+    await edit_screen(callback, text, reply_markup=faq_kb(), use_html=True)
     await callback.answer()
 
 @router.callback_query(F.data == "history")

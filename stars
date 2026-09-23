@@ -75,11 +75,12 @@ EMOJI_HISTORY = "6041730074376410123"    # история заказов
 # на постоянный диск/volume (иначе данные будут теряться при пересборке/деплое!)
 DATA_FILE = os.getenv("DATA_FILE", "data.json")
 
-PRICES = {
-    50: 85, 100: 170, 150: 255, 200: 340, 250: 425,
-    300: 510, 500: 850, 750: 1275, 1000: 1700, 5000: 8500,
-}
-RATE = 1.70
+# ---- ЦЕНЫ ЗА ЗВЁЗДЫ ----
+# Курс задаётся один раз (RATE), а цены в PRICES считаются от него автоматически,
+# чтобы не редактировать вручную каждую сумму при смене курса.
+STAR_AMOUNTS = [50, 100, 150, 200, 250, 300, 500, 750, 1000, 5000]
+RATE = 1.43  # цена за 1 звезду в рублях
+PRICES = {amount: round(amount * RATE, 2) for amount in STAR_AMOUNTS}
 
 CRYPTO_STAR_RATE = 0.0218
 CRYPTO_RUB_RATE = RATE / CRYPTO_STAR_RATE
@@ -89,6 +90,13 @@ def stars_to_usdt(amount: int) -> float:
 
 def rub_to_usdt(rub_amount: float) -> float:
     return round(rub_amount / CRYPTO_RUB_RATE, 2)
+
+def fmt_money(value) -> str:
+    """Красиво отображает сумму: без ',00' там, где число целое."""
+    value = float(value)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 PREMIUM_PRICES = {
     "3": {"label": "3 месяца", "price": 1103, "months": 3},
@@ -110,7 +118,7 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"users": {}, "orders": {}, "withdrawals": {}}
+    return {"users": {}, "orders": {}, "withdrawals": {}, "checks": {}}
 
 def save_data(d):
     # Атомарная запись: сначала во временный файл, потом переименование.
@@ -149,6 +157,7 @@ def get_user(d, user_id):
 
 data = load_data()
 data.setdefault("withdrawals", {})
+data.setdefault("checks", {})
 
 def is_valid_username(text: str) -> bool:
     name = text.strip().lstrip("@")
@@ -159,6 +168,9 @@ def is_admin(user_id: int) -> bool:
 
 def find_order(order_prefix: str):
     return next((o for oid, o in data["orders"].items() if oid.startswith(order_prefix)), None)
+
+def find_check(check_prefix: str):
+    return next((c for cid, c in data["checks"].items() if cid.startswith(check_prefix)), None)
 
 def find_user_id_by_username(username: str):
     """Ищет user_id по username среди тех, кто хотя бы раз запускал бота."""
@@ -193,6 +205,13 @@ class WithdrawStates(StatesGroup):
 class AdminGiveStates(StatesGroup):
     entering_username = State()
     entering_amount = State()
+
+class BroadcastStates(StatesGroup):
+    entering_content = State()
+
+class CheckStates(StatesGroup):
+    entering_amount = State()
+    entering_activations = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -241,7 +260,7 @@ def profile_kb():
 def amounts_kb():
     kb, row = [], []
     for amount, price in PRICES.items():
-        row.append(btn(f"{amount} - {price}₽", callback_data=f"amt_{amount}", icon=EMOJI_STAR, fallback="⭐"))
+        row.append(btn(f"{amount} - {fmt_money(price)}₽", callback_data=f"amt_{amount}", icon=EMOJI_STAR, fallback="⭐"))
         if len(row) == 2:
             kb.append(row); row = []
     if row:
@@ -309,6 +328,9 @@ def admin_withdraw_kb(withdraw_id: str):
 def admin_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Начислить звёзды рефералу", callback_data="admin_give_stars")],
+        [InlineKeyboardButton(text="📢 Написать всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🎫 Создать чек", callback_data="admin_create_check"),
+         InlineKeyboardButton(text="📊 Мои чеки", callback_data="admin_checks_list")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
     ])
 
@@ -435,6 +457,8 @@ async def cmd_start(message: Message, state: FSMContext):
     save_data(data)
 
     args = message.text.split()
+
+    # ---- Реферальная ссылка ----
     if len(args) > 1 and args[1].startswith("ref_"):
         ref_id = args[1].replace("ref_", "")
         if ref_id != str(message.from_user.id):
@@ -450,6 +474,27 @@ async def cmd_start(message: Message, state: FSMContext):
                     )
                 except Exception:
                     pass
+
+    # ---- Чек (ссылка на получение звёзд) ----
+    elif len(args) > 1 and args[1].startswith("check_"):
+        code = args[1][len("check_"):]
+        check = find_check(code)
+        if not check:
+            await message.answer("⚠️ Чек не найден или устарел.")
+        elif message.from_user.id in check["claimed_by"]:
+            await message.answer("Вы уже получили звёзды по этому чеку.")
+        elif len(check["claimed_by"]) >= check["activations"]:
+            await message.answer("⚠️ Все активации этого чека уже использованы.")
+        else:
+            check["claimed_by"].append(message.from_user.id)
+            user["referral_earned"] += check["per_claim"]
+            save_data(data)
+            left = check["activations"] - len(check["claimed_by"])
+            await message.answer(
+                f"🎉 Вы получили {fmt_money(check['per_claim'])} ⭐ по чеку!\n"
+                f"Осталось активаций: {left}\n\n"
+                f"Посмотреть баланс можно в разделе «Профиль»."
+            )
 
     await message.answer("👇", reply_markup=persistent_menu_kb())
     await show_main_menu(message)
@@ -489,7 +534,7 @@ async def cb_choose_amount(callback: CallbackQuery, state: FSMContext):
     price = PRICES[amount]
     await state.update_data(amount=amount, price=price)
     await state.set_state(BuyStates.entering_recipient)
-    text = f"🎉 Вы выбрали: {amount} ⭐ — {price}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
+    text = f"🎉 Вы выбрали: {amount} ⭐ — {fmt_money(price)}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
     await edit_screen(callback, text, reply_markup=recipient_kb())
     await callback.answer()
 
@@ -508,7 +553,7 @@ async def process_custom_amount(message: Message, state: FSMContext):
     price = round(amount * RATE, 2)
     await state.update_data(amount=amount, price=price)
     await state.set_state(BuyStates.entering_recipient)
-    text = f"🎉 Вы выбрали: {amount} ⭐ — {price}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
+    text = f"🎉 Вы выбрали: {amount} ⭐ — {fmt_money(price)}₽\n\nОтправьте @username получателя (от 5 до 32 символов) или нажмите «Купить себе»:"
     await send_screen(message, text, reply_markup=recipient_kb())
 
 @router.callback_query(F.data == "buy_self", BuyStates.entering_recipient)
@@ -517,7 +562,7 @@ async def cb_buy_self(callback: CallbackQuery, state: FSMContext):
     await state.update_data(recipient=recipient)
     await state.set_state(BuyStates.choosing_payment)
     d = await state.get_data()
-    text = f"🎉 {d['amount']} ⭐ для {recipient} — {d['price']}₽\n\n💳 Способ оплаты:"
+    text = f"🎉 {d['amount']} ⭐ для {recipient} — {fmt_money(d['price'])}₽\n\n💳 Способ оплаты:"
     await edit_screen(callback, text, reply_markup=payment_kb())
     await callback.answer()
 
@@ -534,7 +579,7 @@ async def process_recipient(message: Message, state: FSMContext):
     await state.update_data(recipient=recipient)
     await state.set_state(BuyStates.choosing_payment)
     d = await state.get_data()
-    text = f"🎉 {d['amount']} ⭐ для {recipient} — {d['price']}₽\n\n💳 Способ оплаты:"
+    text = f"🎉 {d['amount']} ⭐ для {recipient} — {fmt_money(d['price'])}₽\n\n💳 Способ оплаты:"
     await send_screen(message, text, reply_markup=payment_kb())
 
 @router.callback_query(F.data == "pay_rub", BuyStates.choosing_payment)
@@ -554,7 +599,7 @@ async def cb_pay_rub(callback: CallbackQuery, state: FSMContext):
 
     text = (
         f"💳 Оплата переводом на карту\n\n"
-        f"⭐ Количество: {d['amount']}\n🎁 Получатель: {d['recipient']}\n💵 Сумма: {d['price']}₽\n\n"
+        f"⭐ Количество: {d['amount']}\n🎁 Получатель: {d['recipient']}\n💵 Сумма: {fmt_money(d['price'])}₽\n\n"
         f"🏦 Реквизиты:\nБанк: {CARD_BANK}\nКарта: {CARD_NUMBER}\nПолучатель: {CARD_HOLDER}\n\n"
         f"📎 После оплаты ОБЯЗАТЕЛЬНО отправьте сюда чек (фото или PDF) — иначе заказ не обработается!\n\n"
         f"🆔 ID заказа: {order_id[:8]}"
@@ -609,7 +654,7 @@ async def process_receipt(message: Message, state: FSMContext):
 
     caption = (
         f"🧾 Чек по заказу №{order['id'][:8]} (звёзды)\nОт: @{message.from_user.username or message.from_user.id}\n"
-        f"⭐ {order['amount']} → {order['recipient']}\n💵 {order['price']}₽"
+        f"⭐ {order['amount']} → {order['recipient']}\n💵 {fmt_money(order['price'])}₽"
     )
     kb = admin_order_kb(order["id"])
     for admin_id in ADMIN_IDS:
@@ -810,7 +855,7 @@ async def cb_history(callback: CallbackQuery):
             if o.get("type") == "premium":
                 lines.append(f"№{o['id'][:8]} — Premium {o['label']} — {o['price']}₽ — {o['status']}")
             else:
-                lines.append(f"№{o['id'][:8]} — {o['amount']}⭐ — {o['price']}₽ — {o['status']}")
+                lines.append(f"№{o['id'][:8]} — {o['amount']}⭐ — {fmt_money(o['price'])}₽ — {o['status']}")
         text = "📜 История заказов:\n" + "\n".join(lines)
     await edit_screen(callback, text, reply_markup=back_kb())
     await callback.answer()
@@ -1005,6 +1050,158 @@ async def process_admin_amount(message: Message, state: FSMContext):
         )
     except Exception:
         pass
+
+# -------------------- АДМИН-ПАНЕЛЬ: РАССЫЛКА ВСЕМ --------------------
+
+@router.callback_query(F.data == "admin_broadcast")
+async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    await state.set_state(BroadcastStates.entering_content)
+    await edit_screen(
+        callback,
+        "✏️ Отправьте сообщение, которое разослать всем пользователям бота.\n\n"
+        "Можно текст, фото, видео или документ — оно уйдёт всем как есть, "
+        "включая форматирование.",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+
+@router.message(BroadcastStates.entering_content)
+async def process_broadcast(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    user_ids = list(data["users"].keys())
+    total = len(user_ids)
+    sent, failed = 0, 0
+
+    status = await message.answer(f"⏳ Рассылка запущена: 0/{total}")
+
+    for i, uid in enumerate(user_ids, start=1):
+        try:
+            await message.copy_to(int(uid))
+            sent += 1
+        except Exception:
+            failed += 1
+
+        if i % 25 == 0 or i == total:
+            try:
+                await status.edit_text(f"⏳ Рассылка идёт: {i}/{total}")
+            except Exception:
+                pass
+
+    await state.clear()
+    try:
+        await status.edit_text(
+            f"✅ Рассылка завершена.\n\n"
+            f"Всего получателей: {total}\n"
+            f"Отправлено: {sent}\n"
+            f"Не доставлено: {failed}"
+        )
+    except Exception:
+        await message.answer(
+            f"✅ Рассылка завершена.\n\n"
+            f"Всего получателей: {total}\n"
+            f"Отправлено: {sent}\n"
+            f"Не доставлено: {failed}"
+        )
+
+# -------------------- АДМИН-ПАНЕЛЬ: ЧЕКИ НА ЗВЁЗДЫ --------------------
+
+@router.callback_query(F.data == "admin_create_check")
+async def cb_admin_create_check(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+    await state.set_state(CheckStates.entering_amount)
+    await edit_screen(
+        callback,
+        "🎫 Создание чека\n\n✏️ Сколько всего звёзд положить в чек? Введите число:",
+        reply_markup=back_kb(),
+    )
+    await callback.answer()
+
+@router.message(CheckStates.entering_amount)
+async def process_check_amount(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip().replace(",", ".")
+    if not text.replace(".", "", 1).isdigit() or float(text) <= 0:
+        await message.answer("⚠️ Введите положительное число, например 100:")
+        return
+
+    await state.update_data(check_total=float(text))
+    await state.set_state(CheckStates.entering_activations)
+    await message.answer(
+        "👥 На сколько активаций (человек) разделить чек?\n"
+        "Каждый, кто перейдёт по ссылке, заберёт равную долю. Введите целое число:"
+    )
+
+@router.message(CheckStates.entering_activations)
+async def process_check_activations(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    raw = message.text.strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        await message.answer("⚠️ Введите целое положительное число, например 10:")
+        return
+
+    activations = int(raw)
+    d = await state.get_data()
+    total = d["check_total"]
+    per_claim = round(total / activations, 2)
+
+    check_id = str(uuid.uuid4())
+    data["checks"][check_id] = {
+        "id": check_id,
+        "total": total,
+        "activations": activations,
+        "per_claim": per_claim,
+        "claimed_by": [],
+        "created_by": message.from_user.id,
+        "created_at": datetime.now().isoformat(),
+    }
+    save_data(data)
+    await state.clear()
+
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start=check_{check_id[:8]}"
+
+    await send_screen(
+        message,
+        f"✅ Чек создан!\n\n"
+        f"⭐ Всего звёзд: {fmt_money(total)}\n"
+        f"👥 Активаций: {activations}\n"
+        f"💰 На человека: {fmt_money(per_claim)} ⭐\n\n"
+        f"🔗 Ссылка для получения:\n{link}\n\n"
+        f"🆔 ID чека: {check_id[:8]}",
+        reply_markup=main_menu_kb(),
+    )
+
+@router.callback_query(F.data == "admin_checks_list")
+async def cb_admin_checks_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Только для администратора", show_alert=True)
+        return
+
+    checks = list(data.get("checks", {}).values())
+    if not checks:
+        text = "🎫 Чеков пока нет."
+    else:
+        lines = []
+        for c in checks[-10:]:
+            used = len(c["claimed_by"])
+            given = round(used * c["per_claim"], 2)
+            lines.append(
+                f"№{c['id'][:8]} — {used}/{c['activations']} забрали — "
+                f"{fmt_money(c['per_claim'])}⭐/чел — выдано {fmt_money(given)} из {fmt_money(c['total'])}⭐"
+            )
+        text = "🎫 Последние чеки:\n\n" + "\n".join(lines)
+
+    await edit_screen(callback, text, reply_markup=back_kb())
+    await callback.answer()
 
 # -------------------- ЛОГИКА ПОДТВЕРЖДЕНИЯ ЗАКАЗА (используется и командой, и кнопкой) --------------------
 
@@ -1273,6 +1470,7 @@ async def cmd_check_env(message: Message):
         f"FRAGMENT_TOKEN задан: {'да' if FRAGMENT_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_TON_TOKEN задан: {'да' if FRAGMENT_TON_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_ENABLED: {FRAGMENT_ENABLED}\n"
+        f"Курс (RATE): {RATE}\n"
         f"Админы: {ADMIN_IDS}\n"
         f"Файл данных: {DATA_FILE}\n"
         f"CUSTOM_EMOJI: {CUSTOM_EMOJI}\n"

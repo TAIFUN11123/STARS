@@ -1,10 +1,13 @@
 import asyncio
+import hashlib
 import json
 import os
 import ssl
 import uuid
 from datetime import datetime
 from html import escape as esc
+from urllib.parse import urlencode
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiocryptopay import AioCryptoPay, Networks
 from aiogram.filters import Command, CommandStart
@@ -37,10 +40,20 @@ FRAGMENT_TOKEN = os.getenv("FRAGMENT_TOKEN")
 FRAGMENT_TON_TOKEN = os.getenv("FRAGMENT_TON_TOKEN")
 FRAGMENT_ENABLED = bool(TON_SEED and TONAPI_KEY and FRAGMENT_SSID and FRAGMENT_TOKEN)
 
-# Реквизиты для оплаты (ЗАГЛУШКА - замени на свои реальные!)
-CARD_NUMBER = "2200 7021 6855 9784"
-CARD_BANK = "Т-Банк (Тинькофф)"
-CARD_HOLDER = "ЮСУФ Н."
+# ---- Robokassa (оплата картой/СБП через кассу) ----
+# Заполняется после того, как магазин на Robokassa одобрят: MerchantLogin и оба пароля
+# берутся в личном кабинете Robokassa → «Технические настройки».
+ROBOKASSA_LOGIN = os.getenv("ROBOKASSA_LOGIN")
+ROBOKASSA_PASSWORD1 = os.getenv("ROBOKASSA_PASSWORD1")
+ROBOKASSA_PASSWORD2 = os.getenv("ROBOKASSA_PASSWORD2")
+ROBOKASSA_TEST = os.getenv("ROBOKASSA_TEST", "0") == "1"  # тестовый режим (IsTest=1)
+ROBOKASSA_ENABLED = bool(ROBOKASSA_LOGIN and ROBOKASSA_PASSWORD1 and ROBOKASSA_PASSWORD2)
+# Порт, на котором бот слушает уведомления от Robokassa (ResultURL/SuccessURL/FailURL).
+# В личном кабинете Robokassa эти адреса нужно прописать как:
+#   ResultURL  = http://ТВОЙ_ДОМЕН_ИЛИ_IP:ROBOKASSA_PORT/robokassa/result
+#   SuccessURL = http://ТВОЙ_ДОМЕН_ИЛИ_IP:ROBOKASSA_PORT/robokassa/success
+#   FailURL    = http://ТВОЙ_ДОМЕН_ИЛИ_IP:ROBOKASSA_PORT/robokassa/fail
+ROBOKASSA_PORT = int(os.getenv("ROBOKASSA_PORT", "8080"))
 
 BANNER_URL = "https://raw.githubusercontent.com/TAIFUN11123/STARS/main/logo2.png"
 REVIEW_URL = "https://t.me/TaifunSh"  # ссылка на пост, где оставляют отзывы в комментариях
@@ -111,7 +124,10 @@ REFERRAL_BONUS = 1.5
 MIN_USERNAME_LEN = 5
 MAX_USERNAME_LEN = 32
 
-PENDING_STATUSES = {"ожидает оплаты", "ожидает оплаты (crypto)", "чек отправлен, ожидает проверки"}
+PENDING_STATUSES = {
+    "ожидает оплаты", "ожидает оплаты (crypto)", "ожидает оплаты (robokassa)",
+    "чек отправлен, ожидает проверки",
+}
 
 # ==================== ХРАНИЛИЩЕ ====================
 

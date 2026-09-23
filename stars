@@ -69,6 +69,7 @@ EMOJI_USERID = "5884366771913233289"     # твой айди
 EMOJI_SINCE = "5776233299424843260"      # в боте с
 EMOJI_RANK = "5805553606635559688"       # вы занимаете место
 EMOJI_HISTORY = "6041730074376410123"    # история заказов
+EMOJI_CHECK = "6037175527846975726"      # "Вы получили ..." по чеку
 
 # ---- ХРАНЕНИЕ ДАННЫХ ----
 # Путь можно переопределить переменной окружения DATA_FILE, чтобы указать
@@ -210,8 +211,8 @@ class BroadcastStates(StatesGroup):
     entering_content = State()
 
 class CheckStates(StatesGroup):
-    entering_amount = State()
     entering_activations = State()
+    entering_per_person = State()
 
 # ==================== КЛАВИАТУРЫ ====================
 
@@ -489,11 +490,10 @@ async def cmd_start(message: Message, state: FSMContext):
             check["claimed_by"].append(message.from_user.id)
             user["referral_earned"] += check["per_claim"]
             save_data(data)
-            left = check["activations"] - len(check["claimed_by"])
             await message.answer(
-                f"🎉 Вы получили {fmt_money(check['per_claim'])} ⭐ по чеку!\n"
-                f"Осталось активаций: {left}\n\n"
-                f"Посмотреть баланс можно в разделе «Профиль»."
+                f"{ce(EMOJI_CHECK, '🎉')} Вы получили {fmt_money(check['per_claim'])} ⭐ по чеку!\n\n"
+                f"Посмотреть баланс можно в разделе «Профиль».",
+                parse_mode="HTML",
             )
 
     await message.answer("👇", reply_markup=persistent_menu_kb())
@@ -1115,29 +1115,13 @@ async def cb_admin_create_check(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Только для администратора", show_alert=True)
         return
-    await state.set_state(CheckStates.entering_amount)
+    await state.set_state(CheckStates.entering_activations)
     await edit_screen(
         callback,
-        "🎫 Создание чека\n\n✏️ Сколько всего звёзд положить в чек? Введите число:",
+        "🎫 Создание чека\n\n👥 На сколько активаций (человек) сделать чек? Введите целое число:",
         reply_markup=back_kb(),
     )
     await callback.answer()
-
-@router.message(CheckStates.entering_amount)
-async def process_check_amount(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    text = message.text.strip().replace(",", ".")
-    if not text.replace(".", "", 1).isdigit() or float(text) <= 0:
-        await message.answer("⚠️ Введите положительное число, например 100:")
-        return
-
-    await state.update_data(check_total=float(text))
-    await state.set_state(CheckStates.entering_activations)
-    await message.answer(
-        "👥 На сколько активаций (человек) разделить чек?\n"
-        "Каждый, кто перейдёт по ссылке, заберёт равную долю. Введите целое число:"
-    )
 
 @router.message(CheckStates.entering_activations)
 async def process_check_activations(message: Message, state: FSMContext):
@@ -1148,10 +1132,23 @@ async def process_check_activations(message: Message, state: FSMContext):
         await message.answer("⚠️ Введите целое положительное число, например 10:")
         return
 
-    activations = int(raw)
+    await state.update_data(check_activations=int(raw))
+    await state.set_state(CheckStates.entering_per_person)
+    await message.answer("⭐ Сколько звёзд получит каждый (на 1 человека)? Введите число:")
+
+@router.message(CheckStates.entering_per_person)
+async def process_check_per_person(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text.strip().replace(",", ".")
+    if not text.replace(".", "", 1).isdigit() or float(text) <= 0:
+        await message.answer("⚠️ Введите положительное число, например 25:")
+        return
+
+    per_claim = float(text)
     d = await state.get_data()
-    total = d["check_total"]
-    per_claim = round(total / activations, 2)
+    activations = d["check_activations"]
+    total = round(per_claim * activations, 2)
 
     check_id = str(uuid.uuid4())
     data["checks"][check_id] = {

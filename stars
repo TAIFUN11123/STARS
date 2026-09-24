@@ -21,6 +21,9 @@ from aiogram.types import (
     BotCommand,
 )
 
+# ---- Anypay (оплата картой/СБП, файл anypay.py лежит рядом с этим файлом) ----
+from anypay import ANYPAY_ENABLED, payment_link, fetch_paid_amount
+
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
@@ -30,6 +33,13 @@ ADMIN_IDS = list(dict.fromkeys(ADMIN_IDS))
 ADMIN_ID = ADMIN_IDS[0]
 
 PROXY_URL = ""  # <-- прокси из Happ (для локального теста). Если не нужен - оставь "" (пустую строку)
+
+# ---- Реквизиты для оплаты переводом на карту ----
+# В присланной версии кода этих констант не было. Задай их переменными окружения
+# CARD_BANK / CARD_NUMBER / CARD_HOLDER (или впиши значения прямо сюда вместо УКАЖИ_...).
+CARD_BANK = os.getenv("CARD_BANK", "УКАЖИ_БАНК")
+CARD_NUMBER = os.getenv("CARD_NUMBER", "УКАЖИ_НОМЕР_КАРТЫ")
+CARD_HOLDER = os.getenv("CARD_HOLDER", "УКАЖИ_ПОЛУЧАТЕЛЯ")
 
 # ---- Fragment (автоматическая отправка звёзд/Premium) ----
 TON_SEED = os.getenv("TON_SEED")
@@ -126,6 +136,7 @@ MAX_USERNAME_LEN = 32
 
 PENDING_STATUSES = {
     "ожидает оплаты", "ожидает оплаты (crypto)", "ожидает оплаты (robokassa)",
+    "ожидает оплаты (anypay)",
     "чек отправлен, ожидает проверки",
 }
 
@@ -293,11 +304,15 @@ def recipient_kb():
     ])
 
 def payment_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = []
+    if ANYPAY_ENABLED:
+        rows.append([InlineKeyboardButton(text="💳 Карта / СБП", callback_data="pay_anypay")])
+    rows += [
         [InlineKeyboardButton(text="₽ Рубли (перевод на карту)", callback_data="pay_rub")],
         [InlineKeyboardButton(text="💎 CryptoBot", callback_data="pay_crypto")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def premium_menu_kb():
     kb = []
@@ -307,11 +322,15 @@ def premium_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def premium_pay_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = []
+    if ANYPAY_ENABLED:
+        rows.append([InlineKeyboardButton(text="💳 Карта / СБП", callback_data="prempay_anypay")])
+    rows += [
         [InlineKeyboardButton(text="₽ Рубли (перевод на карту)", callback_data="prempay_confirm")],
         [InlineKeyboardButton(text="💎 CryptoBot", callback_data="prempay_crypto")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]])
@@ -1218,7 +1237,7 @@ async def cb_admin_checks_list(callback: CallbackQuery):
 
 # -------------------- ЛОГИКА ПОДТВЕРЖДЕНИЯ ЗАКАЗА (используется и командой, и кнопкой) --------------------
 
-async def process_order_confirmation(order_id_prefix: str, admin_id: int, reply_func):
+async def process_order_confirmation(order_id_prefix: str, admin_id, reply_func):
     """reply_func(text) - функция, чтобы ответить туда, откуда пришёл запрос (message.answer или callback.message.answer)."""
     found = find_order(order_id_prefix)
     if not found:
@@ -1483,6 +1502,7 @@ async def cmd_check_env(message: Message):
         f"FRAGMENT_TOKEN задан: {'да' if FRAGMENT_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_TON_TOKEN задан: {'да' if FRAGMENT_TON_TOKEN else 'НЕТ'}\n"
         f"FRAGMENT_ENABLED: {FRAGMENT_ENABLED}\n"
+        f"ANYPAY_ENABLED: {ANYPAY_ENABLED}\n"
         f"Курс (RATE): {RATE}\n"
         f"Админы: {ADMIN_IDS}\n"
         f"Файл данных: {DATA_FILE}\n"
@@ -1519,6 +1539,111 @@ async def cmd_wallet_check(message: Message):
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+# -------------------- ANYPAY: КАРТА / СБП (автоматически) --------------------
+
+def next_anypay_id() -> int:
+    data["anypay_counter"] = data.get("anypay_counter", 1000) + 1
+    save_data(data)
+    return data["anypay_counter"]
+
+def anypay_kb(url: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить", url=url)],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+    ])
+
+@router.callback_query(F.data == "pay_anypay", BuyStates.choosing_payment)
+async def cb_pay_anypay(callback: CallbackQuery, state: FSMContext):
+    if not ANYPAY_ENABLED:
+        await callback.answer("Оплата временно недоступна", show_alert=True)
+        return
+    d = await state.get_data()
+    order_id = str(uuid.uuid4())
+    pay_id = next_anypay_id()
+    data["orders"][order_id] = {
+        "id": order_id, "type": "stars", "user_id": str(callback.from_user.id),
+        "username": callback.from_user.username or "",
+        "recipient": d["recipient"], "amount": d["amount"], "price": d["price"],
+        "status": "ожидает оплаты (anypay)", "anypay_pay_id": pay_id,
+        "created_at": datetime.now().isoformat(),
+    }
+    save_data(data)
+    url = payment_link(pay_id, float(d["price"]), f"Telegram Stars {d['amount']} шт")
+    text = (
+        f"💳 Оплата картой / СБП\n\n"
+        f"⭐ Количество: {d['amount']}\n🎁 Получатель: {d['recipient']}\n"
+        f"💵 Сумма: {fmt_money(d['price'])}₽\n\n"
+        f"Нажмите «Оплатить». После оплаты звёзды придут автоматически, "
+        f"обычно в течение пары минут.\n\n🆔 ID заказа: {order_id[:8]}"
+    )
+    await edit_screen(callback, text, reply_markup=anypay_kb(url))
+    await callback.answer()
+
+@router.callback_query(F.data == "prempay_anypay")
+async def cb_premium_pay_anypay(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if "premium_price" not in d:
+        await callback.answer("Сессия устарела, выберите подписку заново", show_alert=True)
+        await edit_screen(callback, "💎 Раздел Premium:", reply_markup=premium_menu_kb())
+        return
+    if not ANYPAY_ENABLED:
+        await callback.answer("Оплата временно недоступна", show_alert=True)
+        return
+    order_id = str(uuid.uuid4())
+    pay_id = next_anypay_id()
+    data["orders"][order_id] = {
+        "id": order_id, "type": "premium", "user_id": str(callback.from_user.id),
+        "username": callback.from_user.username or "",
+        "recipient": f"@{callback.from_user.username}" if callback.from_user.username else str(callback.from_user.id),
+        "label": d["premium_label"], "price": d["premium_price"], "months": d["premium_months"],
+        "status": "ожидает оплаты (anypay)", "anypay_pay_id": pay_id,
+        "created_at": datetime.now().isoformat(),
+    }
+    save_data(data)
+    url = payment_link(pay_id, float(d["premium_price"]), f"Telegram Premium {d['premium_label']}")
+    text = (
+        f"💳 Оплата Premium картой / СБП\n\n"
+        f"💎 Подписка: {d['premium_label']}\n💵 Сумма: {d['premium_price']}₽\n\n"
+        f"Нажмите «Оплатить». После оплаты подписка активируется автоматически.\n\n"
+        f"🆔 ID заказа: {order_id[:8]}"
+    )
+    await edit_screen(callback, text, reply_markup=anypay_kb(url))
+    await callback.answer()
+
+async def anypay_poll_loop():
+    """Раз в 15 секунд проверяет неоплаченные заказы Anypay и запускает обычное подтверждение."""
+    while True:
+        try:
+            pending = [
+                o for o in list(data["orders"].values())
+                if o.get("status") == "ожидает оплаты (anypay)" and o.get("anypay_pay_id")
+            ]
+            for o in pending:
+                age = (datetime.now() - datetime.fromisoformat(o["created_at"])).total_seconds()
+                if age > 24 * 3600:
+                    o["status"] = "истёк"
+                    save_data(data)
+                    continue
+                try:
+                    paid = await fetch_paid_amount(o["anypay_pay_id"])
+                except Exception as e:
+                    print(f"[anypay] ошибка проверки заказа {o['anypay_pay_id']}: {e}")
+                    continue
+                if paid is None or paid + 0.01 < float(o["price"]):
+                    continue
+
+                async def reply(text, _oid=o["id"][:8]):
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await bot.send_message(admin_id, f"[Anypay, заказ {_oid}] {text}")
+                        except Exception:
+                            pass
+
+                await process_order_confirmation(o["id"], "Anypay (авто)", reply)
+        except Exception as e:
+            print(f"[anypay] ошибка цикла: {e}")
+        await asyncio.sleep(15)
+
 # -------------------- ЗАПУСК --------------------
 
 async def main():
@@ -1527,6 +1652,8 @@ async def main():
         BotCommand(command="menu", description="Открыть меню"),
         BotCommand(command="buy", description="Купить звёзды"),
     ])
+    if ANYPAY_ENABLED:
+        asyncio.create_task(anypay_poll_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

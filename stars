@@ -37,9 +37,9 @@ PROXY_URL = ""  # <-- прокси из Happ (для локального тес
 # ---- Реквизиты для оплаты переводом на карту ----
 # В присланной версии кода этих констант не было. Задай их переменными окружения
 # CARD_BANK / CARD_NUMBER / CARD_HOLDER (или впиши значения прямо сюда вместо УКАЖИ_...).
-CARD_BANK = os.getenv("CARD_BANK", "УКАЖИ_БАНК")
-CARD_NUMBER = os.getenv("CARD_NUMBER", "УКАЖИ_НОМЕР_КАРТЫ")
-CARD_HOLDER = os.getenv("CARD_HOLDER", "УКАЖИ_ПОЛУЧАТЕЛЯ")
+CARD_BANK = os.getenv("CARD_BANK", "")
+CARD_NUMBER = os.getenv("CARD_NUMBER", "")
+CARD_HOLDER = os.getenv("CARD_HOLDER", "")
 
 # ---- Fragment (автоматическая отправка звёзд/Premium) ----
 TON_SEED = os.getenv("TON_SEED")
